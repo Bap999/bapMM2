@@ -2378,7 +2378,7 @@ rightThorn.Parent = main
 
 local bapLabel = Instance.new("TextLabel")
 bapLabel.BackgroundTransparency = 1
-bapLabel.Text = "Bap"
+bapLabel.Text = "B A P"
 bapLabel.TextColor3 = Color3.fromRGB(215, 215, 225)
 bapLabel.TextXAlignment = Enum.TextXAlignment.Left
 bapLabel.TextYAlignment = Enum.TextYAlignment.Center
@@ -2469,7 +2469,7 @@ bapLabel.Parent = botsPage
 bapLabel.Size = UDim2.new(0, 190, 0, 68)
 bapLabel.Position = UDim2.new(0, -6, 1, -70)
 bapLabel.AnchorPoint = Vector2.new(0, 0)
-bapLabel.Text = "Bap"
+bapLabel.Text = "B A P"
 bapLabel.TextSize = 50
 bapLabel.TextScaled = false
 bapLabel.TextXAlignment = Enum.TextXAlignment.Left
