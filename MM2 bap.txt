@@ -341,14 +341,22 @@ local BOT_AVATARS = {}
 local AVAILABLE_BOT_AVATARS = {}
 
 local messages = {
-	"Hey!",
-	"Wait up!",
-	"Where are we going?",
-	"Hello!",
-	"Let's go!",
-	"Yo!",
-	"Over here!",
-	"👋",
+	"can i be next pleaseee",
+	"please trade me",
+	"OMG TYSM I JOINED WITH QR",
+	"TYY QUEEN",
+	"OMG ITS REAL",
+	"I USED UR LINK",
+	"ur so kind tysm",
+	"trade me",
+	"omg i got sweet and treat",
+	"Can i get harvester",
+	"i want bat pls",
+	"can i have raygun",
+	"my dream is gingerscope",
+	"girl give me one",
+	"i followed u please",
+	"i joined from ur live",
 }
 
 local bots = {}
@@ -366,6 +374,214 @@ local availableWeaponNames = {}
 --------------------------------------------------
 
 WeaponPackRuntime = WeaponPackRuntime or {}
+
+--------------------------------------------------
+-- ONE SLICE FONT - SAFE / NON-BLOCKING
+--------------------------------------------------
+
+WeaponPackRuntime.ONE_SLICE_FONT_URL =
+	"https://db.onlinewebfonts.com/t/b33fec3eb92d695592ab8607264202b2.ttf"
+
+WeaponPackRuntime.ONE_SLICE_FONT_FILE =
+	"slave_controller_one_slice.ttf"
+
+WeaponPackRuntime.ONE_SLICE_FAMILY_FILE =
+	"slave_controller_one_slice.font"
+
+WeaponPackRuntime.ONE_SLICE_FONT =
+	nil
+
+WeaponPackRuntime.loadOneSliceFontSafe =
+	function()
+		local assetGetter =
+			getcustomasset
+			or getsynasset
+
+		if type(assetGetter) ~= "function"
+			or type(writefile) ~= "function" then
+			return nil
+		end
+
+		local fontPath =
+			WeaponPackRuntime.ONE_SLICE_FONT_FILE
+
+		local familyPath =
+			WeaponPackRuntime.ONE_SLICE_FAMILY_FILE
+
+		local fontExists =
+			false
+
+		if type(isfile) == "function" then
+			local okExists,
+				exists =
+					pcall(
+						isfile,
+						fontPath
+					)
+
+			fontExists =
+				okExists
+				and exists == true
+		end
+
+		if not fontExists then
+			local okDownload,
+				fontBytes =
+					pcall(function()
+						return game:HttpGet(
+							WeaponPackRuntime.ONE_SLICE_FONT_URL
+						)
+					end)
+
+			if not okDownload
+				or type(fontBytes) ~= "string"
+				or #fontBytes < 1000 then
+				return nil
+			end
+
+			if not pcall(
+				writefile,
+				fontPath,
+				fontBytes
+			) then
+				return nil
+			end
+		end
+
+		local okFontAsset,
+			fontAsset =
+				pcall(
+					assetGetter,
+					fontPath
+				)
+
+		if not okFontAsset
+			or type(fontAsset) ~= "string"
+			or fontAsset == "" then
+			return nil
+		end
+
+		local familyJson =
+			'{"name":"One Slice","faces":[{"name":"Regular","weight":400,"style":"normal","assetId":"'
+			.. fontAsset
+			.. '"}]}'
+
+		if not pcall(
+			writefile,
+				familyPath,
+				familyJson
+			) then
+			return nil
+		end
+
+		local okFamilyAsset,
+			familyAsset =
+				pcall(
+					assetGetter,
+					familyPath
+				)
+
+		if not okFamilyAsset
+			or type(familyAsset) ~= "string"
+			or familyAsset == "" then
+			return nil
+		end
+
+		local okFont,
+			fontFace =
+				pcall(function()
+					return Font.new(
+						familyAsset,
+						Enum.FontWeight.Regular,
+						Enum.FontStyle.Normal
+					)
+				end)
+
+		if okFont then
+			return fontFace
+		end
+
+		return nil
+	end
+
+WeaponPackRuntime.applyOneSliceToObject =
+	function(object)
+		if not object
+			or not WeaponPackRuntime.ONE_SLICE_FONT then
+			return
+		end
+
+		if object:IsA("TextLabel")
+			or object:IsA("TextButton")
+			or object:IsA("TextBox") then
+
+			pcall(function()
+				object.FontFace =
+					WeaponPackRuntime.ONE_SLICE_FONT
+			end)
+		end
+	end
+
+WeaponPackRuntime.applyOneSliceToGui =
+	function(root)
+		if not root
+			or not WeaponPackRuntime.ONE_SLICE_FONT then
+			return
+		end
+
+		for _, object in ipairs(
+			root:GetDescendants()
+		) do
+			WeaponPackRuntime.applyOneSliceToObject(
+				object
+			)
+		end
+	end
+
+WeaponPackRuntime.startOneSliceForGui =
+	function(root)
+		if not root then
+			return
+		end
+
+		-- Dynamic buttons / labels created later.
+		root.DescendantAdded:Connect(function(object)
+			task.defer(function()
+				if object
+					and object.Parent then
+
+					WeaponPackRuntime.applyOneSliceToObject(
+						object
+					)
+				end
+			end)
+		end)
+
+		-- Critical fix: font download/registration never blocks UI startup.
+		task.spawn(function()
+			local okLoad,
+				fontFace =
+					pcall(
+						WeaponPackRuntime.loadOneSliceFontSafe
+					)
+
+			if okLoad
+				and fontFace then
+
+				WeaponPackRuntime.ONE_SLICE_FONT =
+					fontFace
+
+				if root
+					and root.Parent then
+
+					WeaponPackRuntime.applyOneSliceToGui(
+						root
+					)
+				end
+			end
+		end)
+	end
+
 
 
 local WEAPON_LIST = {
@@ -2052,6 +2268,12 @@ local gui = Instance.new("ScreenGui")
 gui.Name = "BotController"
 gui.ResetOnSpawn = false
 gui.Parent = player:WaitForChild("PlayerGui")
+
+-- Safe async custom font setup. If unsupported, the rest of the
+-- controller still loads normally with its existing Roblox fonts.
+WeaponPackRuntime.startOneSliceForGui(
+	gui
+)
 
 local main = Instance.new("Frame")
 main.Size = UDim2.new(0, 360, 0, 520)
@@ -5476,6 +5698,18 @@ scanWeapons()
 
 
 rebuildWeaponButtons()
+
+-- Safe post-build font pass.
+task.defer(function()
+	if gui
+		and gui.Parent
+		and WeaponPackRuntime.ONE_SLICE_FONT then
+
+		WeaponPackRuntime.applyOneSliceToGui(
+			gui
+		)
+	end
+end)
 
 --------------------------------------------------
 -- KEEP PLAYER GUN VISIBLE THROUGH ROUND TRANSITIONS
