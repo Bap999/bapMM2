@@ -1,3 +1,4 @@
+
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -507,7 +508,8 @@ WeaponPackRuntime.loadOneSliceFontSafe =
 WeaponPackRuntime.applyOneSliceToObject =
 	function(object)
 		if not object
-			or not WeaponPackRuntime.ONE_SLICE_FONT then
+			or not WeaponPackRuntime.ONE_SLICE_FONT
+			or object:GetAttribute("KeepNativeFont") == true then
 			return
 		end
 
@@ -2276,8 +2278,8 @@ WeaponPackRuntime.startOneSliceForGui(
 )
 
 local main = Instance.new("Frame")
-main.Size = UDim2.new(0, 360, 0, 520)
-main.Position = UDim2.new(0.5, -180, 0.5, -260)
+main.Size = UDim2.new(0, 360, 0, 540)
+main.Position = UDim2.new(0.5, -180, 0.5, -270)
 main.BackgroundColor3 = Color3.fromRGB(10, 10, 13)
 main.BorderSizePixel = 0
 main.Parent = gui
@@ -2332,7 +2334,7 @@ end)
 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -135, 0, 40)
-title.Position = UDim2.new(0, 24, 0, 10)
+title.Position = UDim2.new(0, 24, 0, 20)
 title.BackgroundTransparency = 1
 title.Text = "SLAVE CONTROLLER"
 title.TextColor3 = Color3.new(1, 1, 1)
@@ -2375,15 +2377,15 @@ rightThorn.TextWrapped = true
 rightThorn.Parent = main
 
 local bapLabel = Instance.new("TextLabel")
-bapLabel.Size = UDim2.new(0, 90, 0, 28)
-bapLabel.Position = UDim2.new(1, -116, 0, 13)
 bapLabel.BackgroundTransparency = 1
-bapLabel.Text = "Bap ⛧"
+bapLabel.Text = "Bap"
 bapLabel.TextColor3 = Color3.fromRGB(215, 215, 225)
+bapLabel.TextXAlignment = Enum.TextXAlignment.Left
+bapLabel.TextYAlignment = Enum.TextYAlignment.Center
 bapLabel.TextSize = 14
-bapLabel.Font = Enum.Font.GothamSemibold
-bapLabel.TextXAlignment = Enum.TextXAlignment.Right
+bapLabel.Font = Enum.Font.GothamSemibold -- fallback until the UI's One Slice font loads
 bapLabel.ZIndex = 5
+bapLabel.Visible = false
 bapLabel.Parent = main
 
 --------------------------------------------------
@@ -2392,7 +2394,7 @@ bapLabel.Parent = main
 
 local status = Instance.new("TextLabel")
 status.Size = UDim2.new(1, -36, 0, 22)
-status.Position = UDim2.new(0, 18, 0, 46)
+status.Position = UDim2.new(0, 18, 0, 58)
 status.BackgroundTransparency = 1
 status.Text = "● STOPPED"
 status.TextColor3 = Color3.fromRGB(255, 80, 80)
@@ -2438,28 +2440,40 @@ end
 
 local botsTabButton = createButton(
 	"BOTS",
-	UDim2.new(0, 24, 0, 80),
+	UDim2.new(0, 24, 0, 98),
 	UDim2.new(0, 150, 0, 36)
 )
 
 local weaponsTabButton = createButton(
 	"WEAPONS",
-	UDim2.new(0, 186, 0, 80),
+	UDim2.new(0, 186, 0, 98),
 	UDim2.new(0, 150, 0, 36)
 )
 
 local botsPage = Instance.new("Frame")
-botsPage.Size = UDim2.new(1, -48, 1, -138)
-botsPage.Position = UDim2.new(0, 24, 0, 124)
+botsPage.Size = UDim2.new(1, -48, 1, -156)
+botsPage.Position = UDim2.new(0, 24, 0, 142)
 botsPage.BackgroundTransparency = 1
 botsPage.Parent = main
 
 local weaponsPage = Instance.new("Frame")
-weaponsPage.Size = UDim2.new(1, -48, 1, -138)
-weaponsPage.Position = UDim2.new(0, 24, 0, 124)
+weaponsPage.Size = UDim2.new(1, -48, 1, -156)
+weaponsPage.Position = UDim2.new(0, 24, 0, 142)
 weaponsPage.BackgroundTransparency = 1
 weaponsPage.Visible = false
 weaponsPage.Parent = main
+
+-- Bap branding: same style/font as the rest of the UI, BOTS tab only.
+-- Positioned at the bottom-left, enlarged to roughly 3x the previous size.
+bapLabel.Parent = botsPage
+bapLabel.Size = UDim2.new(0, 190, 0, 68)
+bapLabel.Position = UDim2.new(0, -6, 1, -70)
+bapLabel.AnchorPoint = Vector2.new(0, 0)
+bapLabel.Text = "Bap"
+bapLabel.TextSize = 50
+bapLabel.TextScaled = false
+bapLabel.TextXAlignment = Enum.TextXAlignment.Left
+bapLabel.Visible = true
 
 local function setActiveTab(tabName)
 	local botsActive =
@@ -2491,6 +2505,92 @@ weaponsTabButton.MouseButton1Click:Connect(function()
 end)
 
 setActiveTab("BOTS")
+
+--------------------------------------------------
+-- HEADER RESIZE + COLLAPSE (NO EXTRA TOP-LEVEL LOCALS)
+--------------------------------------------------
+
+WeaponPackRuntime.ControllerUI = WeaponPackRuntime.ControllerUI or {}
+WeaponPackRuntime.ControllerUI.ScaleValue = 1
+WeaponPackRuntime.ControllerUI.Collapsed = false
+WeaponPackRuntime.ControllerUI.LastTab = "BOTS"
+
+WeaponPackRuntime.ControllerUI.Scale = Instance.new("UIScale")
+WeaponPackRuntime.ControllerUI.Scale.Name = "ControllerUIScale"
+WeaponPackRuntime.ControllerUI.Scale.Scale = 1
+WeaponPackRuntime.ControllerUI.Scale.Parent = main
+
+WeaponPackRuntime.ControllerUI.Minus = createButton(
+    "-",
+    UDim2.new(1, -76, 0, 15),
+    UDim2.new(0, 22, 0, 22)
+)
+WeaponPackRuntime.ControllerUI.Minus.Name = "ResizeMinus"
+WeaponPackRuntime.ControllerUI.Minus.TextSize = 15
+WeaponPackRuntime.ControllerUI.Minus.ZIndex = 50
+
+WeaponPackRuntime.ControllerUI.Plus = createButton(
+    "+",
+    UDim2.new(1, -50, 0, 15),
+    UDim2.new(0, 22, 0, 22)
+)
+WeaponPackRuntime.ControllerUI.Plus.Name = "ResizePlus"
+WeaponPackRuntime.ControllerUI.Plus.TextSize = 15
+WeaponPackRuntime.ControllerUI.Plus.ZIndex = 50
+
+WeaponPackRuntime.ControllerUI.Close = createButton(
+    "X",
+    UDim2.new(1, -24, 0, 15),
+    UDim2.new(0, 22, 0, 22)
+)
+WeaponPackRuntime.ControllerUI.Close.Name = "CollapseButton"
+WeaponPackRuntime.ControllerUI.Close.TextSize = 13
+WeaponPackRuntime.ControllerUI.Close.ZIndex = 50
+
+-- BAP is intentionally not in the header anymore.
+-- Give the title its normal width now that the center header is clear.
+title.Size = UDim2.new(1, -135, 0, 40)
+
+WeaponPackRuntime.ControllerUI.ApplyScale = function(value)
+    value = math.clamp(value, 0.70, 1.30)
+    WeaponPackRuntime.ControllerUI.ScaleValue = value
+    WeaponPackRuntime.ControllerUI.Scale.Scale = value
+end
+
+WeaponPackRuntime.ControllerUI.Minus.MouseButton1Click:Connect(function()
+    WeaponPackRuntime.ControllerUI.ApplyScale(WeaponPackRuntime.ControllerUI.ScaleValue - 0.10)
+end)
+
+WeaponPackRuntime.ControllerUI.Plus.MouseButton1Click:Connect(function()
+    WeaponPackRuntime.ControllerUI.ApplyScale(WeaponPackRuntime.ControllerUI.ScaleValue + 0.10)
+end)
+
+WeaponPackRuntime.ControllerUI.SetCollapsed = function(collapsed)
+    WeaponPackRuntime.ControllerUI.Collapsed = collapsed
+    if collapsed then
+        WeaponPackRuntime.ControllerUI.LastTab = weaponsPage.Visible and "WEAPONS" or "BOTS"
+        botsTabButton.Visible = false
+        weaponsTabButton.Visible = false
+        botsPage.Visible = false
+        weaponsPage.Visible = false
+        leftThorn.Visible = false
+        rightThorn.Visible = false
+        main.Size = UDim2.new(0, 360, 0, 88)
+        WeaponPackRuntime.ControllerUI.Close.Text = "□"
+    else
+        main.Size = UDim2.new(0, 360, 0, 540)
+        botsTabButton.Visible = true
+        weaponsTabButton.Visible = true
+        leftThorn.Visible = true
+        rightThorn.Visible = true
+        setActiveTab(WeaponPackRuntime.ControllerUI.LastTab)
+        WeaponPackRuntime.ControllerUI.Close.Text = "X"
+    end
+end
+
+WeaponPackRuntime.ControllerUI.Close.MouseButton1Click:Connect(function()
+    WeaponPackRuntime.ControllerUI.SetCollapsed(not WeaponPackRuntime.ControllerUI.Collapsed)
+end)
 
 --------------------------------------------------
 -- BOTS TAB
@@ -5609,7 +5709,12 @@ equipPlayerWeapon = function(name)
 		WeaponPackRuntime.ensurePersistentGunFallback(
 			character,
 			wantedName,
-			false
+			true
+		)
+
+		WeaponPackRuntime.hideCurrentGunHost(
+			character,
+			wantedName
 		)
 	else
 		WeaponPackRuntime.destroyPersistentGunFallback()
@@ -6066,6 +6171,21 @@ WeaponPackRuntime.ensurePersistentGunFallback =
 		local root =
 			model.PrimaryPart
 
+		-- If MM2's current gun host still exists, copy its exact transform.
+		-- This prevents the persistent cosmetic from shifting slightly
+		-- when the round-owned host gets deleted at round end.
+		local liveHost =
+			WeaponPackRuntime.currentReplacementPart
+
+		if liveHost
+			and liveHost.Parent
+			and WeaponPackRuntime.currentReplacementCharacter == character
+			and WeaponPackRuntime.currentReplacementWeaponName == weaponName then
+
+			finalWorldCFrame =
+				liveHost.CFrame
+		end
+
 		root.CFrame =
 			finalWorldCFrame
 
@@ -6127,6 +6247,35 @@ WeaponPackRuntime.isCurrentReplacementAlive =
 		) == weaponName
 	end
 
+WeaponPackRuntime.hideCurrentGunHost =
+	function(character, weaponName)
+		local part = WeaponPackRuntime.currentReplacementPart
+
+		if not part
+			or not part.Parent
+			or WeaponPackRuntime.currentReplacementCharacter ~= character
+			or WeaponPackRuntime.currentReplacementWeaponName ~= weaponName then
+			return false
+		end
+
+		-- The persistent cosmetic is now the visible gun.
+		-- Keep MM2's temporary round-owned host invisible so its deletion
+		-- can never make the selected gun disappear.
+		pcall(function()
+			part.LocalTransparencyModifier = 1
+		end)
+
+		for _, object in ipairs(part:GetDescendants()) do
+			if object:IsA("ParticleEmitter")
+				or object:IsA("Trail")
+				or object:IsA("Beam") then
+				object.Enabled = false
+			end
+		end
+
+		return true
+	end
+
 WeaponPackRuntime.tryRestoreSelectedWeapon =
 	function(character)
 		if not selectedWeaponName
@@ -6147,15 +6296,11 @@ WeaponPackRuntime.tryRestoreSelectedWeapon =
 		end
 
 		if visual.Type == "Gun" then
-			-- Backup is prepared FIRST. If MM2 has no gun host yet,
-			-- the user still sees the selected gun.
+			-- Permanent visible cosmetic. Do NOT hide this during round changes.
 			WeaponPackRuntime.ensurePersistentGunFallback(
 				character,
 				selectedWeaponName,
-				not WeaponPackRuntime.isCurrentReplacementAlive(
-					character,
-					selectedWeaponName
-				)
+				true
 			)
 		end
 
@@ -6165,8 +6310,14 @@ WeaponPackRuntime.tryRestoreSelectedWeapon =
 		) then
 
 			if visual.Type == "Gun" then
-				WeaponPackRuntime.setPersistentGunFallbackVisible(
-					false
+				WeaponPackRuntime.ensurePersistentGunFallback(
+					character,
+					selectedWeaponName,
+					true
+				)
+				WeaponPackRuntime.hideCurrentGunHost(
+					character,
+					selectedWeaponName
 				)
 			end
 
@@ -6181,8 +6332,14 @@ WeaponPackRuntime.tryRestoreSelectedWeapon =
 
 		if success then
 			if visual.Type == "Gun" then
-				WeaponPackRuntime.setPersistentGunFallbackVisible(
-					false
+				WeaponPackRuntime.ensurePersistentGunFallback(
+					character,
+					selectedWeaponName,
+					true
+				)
+				WeaponPackRuntime.hideCurrentGunHost(
+					character,
+					selectedWeaponName
 				)
 			end
 
@@ -6272,8 +6429,14 @@ WeaponPackRuntime.forceRoundWeaponReequip =
 
 				if success then
 					if visual.Type == "Gun" then
-						WeaponPackRuntime.setPersistentGunFallbackVisible(
-							false
+						WeaponPackRuntime.ensurePersistentGunFallback(
+							character,
+							selectedWeaponName,
+							true
+						)
+						WeaponPackRuntime.hideCurrentGunHost(
+							character,
+							selectedWeaponName
 						)
 					end
 
@@ -6536,7 +6699,11 @@ RunService.Heartbeat:Connect(function()
 			WeaponPackRuntime.ensurePersistentGunFallback(
 				character,
 				selectedWeaponName,
-				false
+				true
+			)
+			WeaponPackRuntime.hideCurrentGunHost(
+				character,
+				selectedWeaponName
 			)
 		end
 
