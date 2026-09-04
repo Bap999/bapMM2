@@ -1,0 +1,8810 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TextService = game:GetService("TextService")
+local TweenService = game:GetService("TweenService")
+local PathfindingService = game:GetService("PathfindingService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player = Players.LocalPlayer
+
+--------------------------------------------------
+-- SETTINGS
+--------------------------------------------------
+
+local botCount = 5
+local followDistance = 8
+local chatEnabled = true
+
+local MIN_DISTANCE = 5
+local MAX_DISTANCE = 12
+local WALK_SPEED = 13
+local RUN_SPEED = 19
+local CATCHUP_DISTANCE = 20
+local TELEPORT_DISTANCE = math.huge
+
+-- Detect when the game moves you from lobby into the round/map.
+local ROUND_TELEPORT_DETECT_DISTANCE = 30
+
+-- How far bots get scattered from your new round position.
+local ROUND_SCATTER_MIN_DISTANCE = 28
+local ROUND_SCATTER_MAX_DISTANCE = 55
+local ROUND_SCATTER_ATTEMPTS = 25
+
+-- Delay before bots begin finding you after round starts.
+local ROUND_SEEK_DELAY_MIN = 0.5
+local ROUND_SEEK_DELAY_MAX = 2
+
+local SEEK_REPATH_TIME = 1.0
+local SEEK_FINISH_DISTANCE = 12
+
+local POSITION_CHANGE_MIN = 3
+local POSITION_CHANGE_MAX = 7
+
+-- Small movement while player is standing still
+local IDLE_WANDER_DISTANCE = 8
+local IDLE_MOVE_MIN = 2
+local IDLE_MOVE_MAX = 5
+
+-- Independent movement behavior
+local MOVE_UPDATE_MIN = 0.22
+local MOVE_UPDATE_MAX = 0.65
+local REACTION_DELAY_MIN = 0.15
+local REACTION_DELAY_MAX = 0.9
+local PERSONAL_OFFSET_DRIFT = 3.5
+local RANDOM_PAUSE_CHANCE = 0.10
+local RANDOM_PAUSE_MIN = 0.4
+local RANDOM_PAUSE_MAX = 1.4
+local FOLLOW_DEADZONE_MIN = 2.5
+local FOLLOW_DEADZONE_MAX = 5.5
+
+-- Random jumping
+local RANDOM_JUMP_CHANCE = 0.035
+local RANDOM_JUMP_MIN_INTERVAL = 3
+local RANDOM_JUMP_MAX_INTERVAL = 8
+
+-- Replace ONE bot every 8 minutes
+local BOT_ROTATION_INTERVAL = 8 * 60
+
+--------------------------------------------------
+-- BOT ANIMATION STYLES
+-- Each bot randomly gets one idle/walk style.
+--------------------------------------------------
+
+local BOT_ANIMATION_SETS = {
+	{
+		name = "Stylish",
+		idle1 = 616136790,
+		idle2 = 616138447,
+		walk = 616146177,
+	},
+	{
+		name = "Superhero",
+		idle1 = 616111295,
+		idle2 = 616113536,
+		walk = 616122287,
+	},
+	{
+		name = "Toy",
+		idle1 = 782841498,
+		idle2 = 782845736,
+		walk = 782843345,
+	},
+	{
+		name = "Vampire",
+		idle1 = 1083445855,
+		idle2 = 1083450166,
+		walk = 1083473930,
+	},
+	{
+		name = "Werewolf",
+		idle1 = 1083195517,
+		idle2 = 1083214717,
+		walk = 1083178339,
+	},
+	{
+		name = "Zombie",
+		idle1 = 616158929,
+		idle2 = 616160636,
+		walk = 616168032,
+	},
+	{
+		name = "Levitation",
+		idle1 = 616006778,
+		idle2 = 616008087,
+		walk = 616013216,
+	},
+	{
+		name = "Mage",
+		idle1 = 707742142,
+		idle2 = 707855907,
+		walk = 707897309,
+	},
+	{
+		name = "Ninja",
+		idle1 = 656117400,
+		idle2 = 656118341,
+		walk = 656121766,
+	},
+	{
+		name = "Pirate",
+		idle1 = 750781874,
+		idle2 = 750782770,
+		walk = 750785693,
+	},
+}
+
+local AVAILABLE_ANIMATION_SETS = {}
+
+local function resetAnimationPool()
+	table.clear(AVAILABLE_ANIMATION_SETS)
+
+	for _, set in ipairs(BOT_ANIMATION_SETS) do
+		table.insert(AVAILABLE_ANIMATION_SETS, set)
+	end
+
+	for i = #AVAILABLE_ANIMATION_SETS, 2, -1 do
+		local j = math.random(1, i)
+		AVAILABLE_ANIMATION_SETS[i], AVAILABLE_ANIMATION_SETS[j] =
+			AVAILABLE_ANIMATION_SETS[j], AVAILABLE_ANIMATION_SETS[i]
+	end
+end
+
+resetAnimationPool()
+
+local function takeAnimationSet()
+	if #AVAILABLE_ANIMATION_SETS == 0 then
+		resetAnimationPool()
+	end
+
+	return table.remove(AVAILABLE_ANIMATION_SETS)
+end
+
+local function loadBotAnimations(botModel, humanoid)
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+
+	if not animator then
+		animator = Instance.new("Animator")
+		animator.Parent = humanoid
+	end
+
+	local set = takeAnimationSet()
+
+	local idleAnimation1 = Instance.new("Animation")
+	idleAnimation1.AnimationId =
+		"rbxassetid://" .. tostring(set.idle1)
+
+	local idleAnimation2 = Instance.new("Animation")
+	idleAnimation2.AnimationId =
+		"rbxassetid://" .. tostring(set.idle2)
+
+	local walkAnimation = Instance.new("Animation")
+	walkAnimation.AnimationId =
+		"rbxassetid://" .. tostring(set.walk)
+
+	local idleTrack1
+	local idleTrack2
+	local walkTrack
+
+	local ok1 = pcall(function()
+		idleTrack1 = animator:LoadAnimation(idleAnimation1)
+	end)
+
+	local ok2 = pcall(function()
+		idleTrack2 = animator:LoadAnimation(idleAnimation2)
+	end)
+
+	local ok3 = pcall(function()
+		walkTrack = animator:LoadAnimation(walkAnimation)
+	end)
+
+	idleAnimation1:Destroy()
+	idleAnimation2:Destroy()
+	walkAnimation:Destroy()
+
+	if ok1 and idleTrack1 then
+		idleTrack1.Looped = true
+		idleTrack1.Priority = Enum.AnimationPriority.Idle
+	end
+
+	if ok2 and idleTrack2 then
+		idleTrack2.Looped = true
+		idleTrack2.Priority = Enum.AnimationPriority.Idle
+	end
+
+	if ok3 and walkTrack then
+		walkTrack.Looped = true
+		walkTrack.Priority = Enum.AnimationPriority.Movement
+	end
+
+	return {
+		name = set.name,
+		idle1 = idleTrack1,
+		idle2 = idleTrack2,
+		walk = walkTrack,
+		currentIdle = nil,
+		nextIdleSwap = time() + math.random(6, 14),
+	}
+end
+
+local function stopTrack(track, fade)
+	if track and track.IsPlaying then
+		track:Stop(fade or 0.18)
+	end
+end
+
+local function playBotIdle(bot)
+	local anim = bot.animations
+
+	if not anim then
+		return
+	end
+
+	stopTrack(anim.walk, 0.18)
+
+	if anim.currentIdle
+		and anim.currentIdle.IsPlaying
+		and time() < anim.nextIdleSwap then
+		return
+	end
+
+	stopTrack(anim.idle1, 0.18)
+	stopTrack(anim.idle2, 0.18)
+
+	local nextIdle
+
+	if math.random(1, 100) <= 72 then
+		nextIdle = anim.idle1
+	else
+		nextIdle = anim.idle2
+	end
+
+	anim.currentIdle = nextIdle
+	anim.nextIdleSwap = time() + math.random(7, 16)
+
+	if nextIdle and not nextIdle.IsPlaying then
+		nextIdle:Play(0.22, 1, 1)
+	end
+end
+
+local function playBotWalk(bot)
+	local anim = bot.animations
+
+	if not anim then
+		return
+	end
+
+	stopTrack(anim.idle1, 0.15)
+	stopTrack(anim.idle2, 0.15)
+	anim.currentIdle = nil
+
+	if anim.walk and not anim.walk.IsPlaying then
+		anim.walk:Play(0.18, 1, 1)
+	end
+
+	if anim.walk then
+		-- Slightly change animation speed based on each bot's real WalkSpeed.
+		local speedScale = math.clamp(
+			bot.humanoid.WalkSpeed / WALK_SPEED,
+			0.85,
+			1.4
+		)
+
+		anim.walk:AdjustSpeed(speedScale)
+	end
+end
+
+local function isBotActuallyMoving(bot)
+	if not bot.root or not bot.root.Parent then
+		return false
+	end
+
+	local velocity = bot.root.AssemblyLinearVelocity
+	local horizontalSpeed = Vector3.new(
+		velocity.X,
+		0,
+		velocity.Z
+	).Magnitude
+
+	return horizontalSpeed > 0.75
+end
+
+local BOT_AVATAR_ENTRIES = {
+	"sibelisfunny",
+	"TexH2016",
+	"m0r1shkaa",
+	"Esteralatchescu0ente",
+	"bossbabimj",
+	"Veerle08love",
+	"sedams7",
+	"SLAYFULLCHAR",
+	"Yonce_70",
+	"Alexusu47",
+	"Pickle_20068",
+	"jstarr1212",
+	"vegr1",
+	"Benson22709",
+	"kenyahking",
+	"x_erie2",
+	"b_illie12345",
+	"Kadin_isAGod",
+	"Carlos_CA17",
+	"mihozaki",
+	"mariasanm",
+	"Xo_layyX",
+	"CXRVXNXALT",
+	"Blame2ninja",
+	"Theonlyone_theo",
+}
+
+local BOT_AVATARS = {}
+local AVAILABLE_BOT_AVATARS = {}
+
+local messages = {
+	"Hey!",
+	"Wait up!",
+	"Where are we going?",
+	"Hello!",
+	"Let's go!",
+	"Yo!",
+	"Over here!",
+	"👋",
+}
+
+local bots = {}
+local running = false
+local lastPlayerPosition = nil
+local roundScatterCooldown = false
+local rotationGeneration = 0
+local selectedWeaponName = nil
+local availableWeaponNames = {}
+
+--------------------------------------------------
+-- CONFIGURED WEAPONS
+-- Working weapon set only.
+-- Removed every weapon that failed testing.
+--------------------------------------------------
+
+WeaponPackRuntime = WeaponPackRuntime or {}
+
+
+local WEAPON_LIST = {
+	"Harvester",
+	"Icepiercer",
+	"Snowcannon",
+	"Flowerwood Gun",
+	"Blizzard",
+	"Raygun",
+	"Sunrise",
+	"Vampire's Gun",
+	"Evergun",
+	"Bauble",
+	"Bat",
+	"Waves",
+	"Heart Wand",
+	"Rainbow",
+	"Snowstorm",
+	"Corrupt",
+	"Spirit",
+	"Turkey",
+	"Evergreen",
+	"Celestial",
+}
+
+local WEAPON_ALIASES = {
+	["Harvester"] = {"Harvester"},
+	["Icepiercer"] = {"Icepiercer", "Ice Piercer"},
+	["Snowcannon"] = {"Snowcannon", "Snow Cannon"},
+	["Flowerwood Gun"] = {"Flowerwood Gun", "FlowerwoodGun"},
+	["Blizzard"] = {"Blizzard"},
+	["Raygun"] = {"Raygun", "Ray Gun"},
+	["Sunrise"] = {"Sunrise"},
+	["Vampire's Gun"] = {"Vampire's Gun", "Vampires Gun", "Vampire Gun", "VampiresGun"},
+	["Evergun"] = {"Evergun", "Ever Gun"},
+	["Bauble"] = {"Bauble"},
+	["Bat"] = {"Bat"},
+	["Waves"] = {"Waves"},
+	["Heart Wand"] = {"Heart Wand", "HeartWand"},
+	["Rainbow"] = {"Rainbow"},
+	["Snowstorm"] = {"Snowstorm", "Snow Storm"},
+	["Corrupt"] = {"Corrupt"},
+	["Spirit"] = {"Spirit"},
+	["Turkey"] = {"Turkey"},
+	["Evergreen"] = {"Evergreen"},
+	["Celestial"] = {"Celestial"},
+}
+
+WeaponPackRuntime.WEAPON_TYPE_HINTS = {
+	["Harvester"] = "Gun",
+	["Icepiercer"] = "Gun",
+	["Snowcannon"] = "Gun",
+	["Flowerwood Gun"] = "Gun",
+	["Blizzard"] = "Gun",
+	["Raygun"] = "Gun",
+	["Sunrise"] = "Gun",
+	["Vampire's Gun"] = "Gun",
+	["Evergun"] = "Gun",
+	["Bauble"] = "Gun",
+	["Bat"] = "Knife",
+	["Waves"] = "Knife",
+	["Heart Wand"] = "Knife",
+	["Rainbow"] = "Knife",
+	["Snowstorm"] = "Knife",
+	["Corrupt"] = "Knife",
+	["Spirit"] = "Knife",
+	["Turkey"] = "Knife",
+	["Evergreen"] = "Knife",
+	["Celestial"] = "Knife",
+}
+
+WeaponPackRuntime.WEAPON_YEAR_HINTS = {
+	["Icepiercer"] = 2022,
+	["Snowcannon"] = 2025,
+	["Flowerwood Gun"] = 2024,
+	["Blizzard"] = 2025,
+	["Raygun"] = 2025,
+	["Sunrise"] = 2025,
+	["Vampire's Gun"] = 2024,
+	["Evergun"] = 2023,
+	["Bauble"] = 2024,
+	["Bat"] = 2022,
+	["Waves"] = 2023,
+	["Heart Wand"] = 2026,
+	["Rainbow"] = 2023,
+	["Snowstorm"] = 2025,
+	["Corrupt"] = 2014,
+	["Spirit"] = 2024,
+	["Turkey"] = 2023,
+	["Evergreen"] = 2023,
+	["Celestial"] = 2024,
+}
+
+-- Exact IDs are hardcoded only when verified.
+-- Newer items are resolved from the current MM2 client instead of guessed.
+local FALLBACK_WEAPON_VISUALS = {
+	["Harvester"] = {
+		Type = "Gun",
+		Placement = "WaistRight",
+		MeshId = "rbxassetid://7775027413",
+		TextureId = "rbxassetid://7775245551",
+		Scale = Vector3.new(0.05999999865889549,0.05999999865889549,0.05999999865889549),
+		Offset = Vector3.zero,
+		AttachmentPosition = Vector3.new(0.1299028992652893,0.000002229222218375071,0.07500199228525162),
+		AttachmentOrientation = Vector3.new(-0.0026997302193194628,-60,90.00231170654297),
+	},
+	["Bat"] = {
+		Type = "Knife",
+		Placement = "WaistLeft",
+		MeshId = "rbxassetid://11182796403",
+		TextureId = "rbxassetid://11192090515",
+		Scale = Vector3.new(0.07000000029802322,0.07000000029802322,0.07000000029802322),
+		Offset = Vector3.zero,
+		AttachmentPosition = Vector3.zero,
+		AttachmentOrientation = Vector3.zero,
+	},
+	["Heart Wand"] = {
+		Type = "Knife",
+		Placement = "WaistLeft",
+		MeshId = "rbxassetid://77738838473091",
+		TextureId = "rbxassetid://76246633927299",
+		Scale = Vector3.new(0.07,0.07,0.07),
+		Offset = Vector3.zero,
+		AttachmentPosition = Vector3.zero,
+		AttachmentOrientation = Vector3.zero,
+	},
+	["Waves"] = {
+		Type = "Knife",
+		Placement = "WaistLeft",
+		MeshId = "rbxassetid://13916938702",
+		TextureId = "rbxassetid://13916939964",
+		Scale = Vector3.new(0.09000000357627869,0.09000000357627869,0.09000000357627869),
+		Offset = Vector3.zero,
+		AttachmentPosition = Vector3.zero,
+		AttachmentOrientation = Vector3.zero,
+	},
+	["Rainbow"] = {
+		Type = "Knife",
+		Placement = "WaistLeft",
+		MeshId = "rbxassetid://12921240966",
+		TextureId = "rbxassetid://12921241867",
+		Scale = Vector3.new(0.05999999865889549,0.05999999865889549,0.05999999865889549),
+		Offset = Vector3.zero,
+		AttachmentPosition = Vector3.zero,
+		AttachmentOrientation = Vector3.zero,
+	},
+	["Snowstorm"] = {
+		Type = "Knife",
+		Placement = "WaistLeft",
+		MeshId = "rbxassetid://86944837615327",
+		TextureId = "rbxassetid://84853425379784",
+		Scale = Vector3.new(0.07000000029802322,0.07000000029802322,0.07000000029802322),
+		Offset = Vector3.zero,
+		AttachmentPosition = Vector3.zero,
+		AttachmentOrientation = Vector3.zero,
+	},
+	["Corrupt"] = {
+		Type = "Knife",
+		Placement = "WaistLeft",
+		MeshId = "rbxassetid://121944778",
+		TextureId = "rbxassetid://162016526",
+		Scale = Vector3.new(1,1,1),
+		Offset = Vector3.zero,
+		AttachmentPosition = Vector3.zero,
+		AttachmentOrientation = Vector3.zero,
+	},
+	["Spirit"] = {
+		Type = "Knife",
+		Placement = "WaistLeft",
+		MeshId = "rbxassetid://112444333460928",
+		TextureId = "rbxassetid://131787177447081",
+		Scale = Vector3.new(0.07999999821186066,0.07999999821186066,0.07999999821186066),
+		Offset = Vector3.zero,
+		AttachmentPosition = Vector3.zero,
+		AttachmentOrientation = Vector3.zero,
+	},
+	["Turkey"] = {
+		Type = "Knife",
+		Placement = "WaistLeft",
+		MeshId = "rbxassetid://15320557481",
+		TextureId = "rbxassetid://15320558272",
+		Scale = Vector3.new(0.0560000017285347,0.0560000017285347,0.0560000017285347),
+		Offset = Vector3.zero,
+		AttachmentPosition = Vector3.zero,
+		AttachmentOrientation = Vector3.zero,
+	},
+	["Evergreen"] = {
+		Type = "Knife",
+		Placement = "WaistLeft",
+		MeshId = "rbxassetid://15408280573",
+		TextureId = "rbxassetid://15408244684",
+		Scale = Vector3.new(0.004603884648531675,0.004603884648531675,0.004603884648531675),
+		Offset = Vector3.zero,
+		AttachmentPosition = Vector3.zero,
+		AttachmentOrientation = Vector3.zero,
+	},
+	["Celestial"] = {
+		Type = "Knife",
+		Placement = "Back",
+		MeshId = "rbxassetid://109711282082830",
+		TextureId = "rbxassetid://79010754957272",
+		Scale = Vector3.new(0.07,0.07,0.07),
+		Offset = Vector3.zero,
+		AttachmentPosition = Vector3.zero,
+		AttachmentOrientation = Vector3.zero,
+	},
+
+	["Icepiercer"] = {
+		Type = "Gun",
+		Placement = "WaistRight",
+		MeshId = "rbxassetid://11868991644",
+		TextureId = "rbxassetid://11869075814",
+		Scale = Vector3.new(0.05999999865889549, 0.05999999865889549, 0.05999999865889549),
+		Offset = Vector3.new(0, 0, 0),
+		Color = Color3.new(0.6392157077789307, 0.6352941393852234, 0.6470588445663452),
+		Material = Enum.Material.Plastic,
+		VertexColor = Vector3.new(1, 1, 1),
+		AttachmentPosition = Vector3.new(0.1299028992652893, 0.000002229222218375071, 0.07500199228525162),
+		AttachmentOrientation = Vector3.new(-0.0026997302193194628, -60, 90.00231170654297),
+	},
+
+	["Snowcannon"] = {
+		Type = "Gun",
+		Placement = "WaistRight",
+		MeshId = "rbxassetid://99836890880541",
+		TextureId = "rbxassetid://122392330922281",
+		Scale = Vector3.new(0.05, 0.05, 0.05),
+		Offset = Vector3.new(0, 0, 0),
+	},
+
+	["Flowerwood Gun"] = {
+		Type = "Gun",
+		Placement = "WaistRight",
+		MeshId = "rbxassetid://16895099893",
+		TextureId = "rbxassetid://16895448237",
+		Scale = Vector3.new(0.05, 0.05, 0.05),
+		Offset = Vector3.new(0, 0, 0),
+	},
+
+	["Blizzard"] = {
+		Type = "Gun",
+		Placement = "WaistRight",
+		MeshId = "rbxassetid://77235373292363",
+		TextureId = "rbxassetid://131115493735176",
+		Scale = Vector3.new(0.05000000074505806, 0.05000000074505806, 0.05000000074505806),
+		Offset = Vector3.new(0, 0, 0),
+		Color = Color3.new(0.6392157077789307, 0.6352941393852234, 0.6470588445663452),
+		Material = Enum.Material.Plastic,
+		VertexColor = Vector3.new(1, 1, 1),
+		AttachmentPosition = Vector3.new(0, -0.20000000298023224, 0.08990859985351562),
+		AttachmentOrientation = Vector3.new(-50.001827239990234, 0, 0),
+	},
+
+	["Raygun"] = {
+		Type = "Gun",
+		Placement = "WaistRight",
+		MeshId = "rbxassetid://115447220952926",
+		TextureId = "rbxassetid://127881437685243",
+		Scale = Vector3.new(0.05000000074505806, 0.05000000074505806, 0.05000000074505806),
+		Offset = Vector3.new(0, 0, 0),
+		Color = Color3.new(0.6392157077789307, 0.6352941393852234, 0.6470588445663452),
+		Material = Enum.Material.Slate,
+		VertexColor = Vector3.new(1, 1, 1),
+		AttachmentPosition = Vector3.new(0, -0.20000000298023224, 0.08990859985351562),
+		AttachmentOrientation = Vector3.new(-50.001827239990234, 0, 0),
+	},
+
+	["Sunrise"] = {
+		Type = "Gun",
+		Placement = "WaistRight",
+		MeshId = "rbxassetid://109742397574153",
+		TextureId = "rbxassetid://71731808219690",
+		ChromaTexture = "rbxassetid://122480499480858",
+		Scale = Vector3.new(0.04584595561027527, 0.04584595561027527, 0.04584595561027527),
+		Offset = Vector3.new(0, 0, 0),
+		Color = Color3.new(0.6392157077789307, 0.6352941393852234, 0.6470588445663452),
+		Material = Enum.Material.Plastic,
+		VertexColor = Vector3.new(1, 1, 1),
+		AttachmentPosition = Vector3.new(0, -0.20000000298023224, 0.08990859985351562),
+		AttachmentOrientation = Vector3.new(-50.001827239990234, 0, 0),
+	},
+
+	["Chroma Sunrise"] = {
+		Type = "Gun",
+		Placement = "WaistRight",
+		MeshId = "rbxassetid://109742397574153",
+		TextureId = "rbxassetid://122480499480858",
+		Scale = Vector3.new(0.04584595561027527, 0.04584595561027527, 0.04584595561027527),
+		Offset = Vector3.new(0, 0, 0),
+		Color = Color3.new(0.6392157077789307, 0.6352941393852234, 0.6470588445663452),
+		Material = Enum.Material.Plastic,
+		VertexColor = Vector3.new(1, 1, 1),
+		AttachmentPosition = Vector3.new(0, -0.20000000298023224, 0.08990859985351562),
+		AttachmentOrientation = Vector3.new(-50.001827239990234, 0, 0),
+	},
+
+	["Vampire's Gun"] = {
+		Type = "Gun",
+		Placement = "WaistRight",
+		MeshId = "rbxassetid://126591885289479",
+		TextureId = "rbxassetid://104946799389637",
+		Scale = Vector3.new(0.05000000074505806, 0.05000000074505806, 0.05000000074505806),
+		Offset = Vector3.new(0, 0, 0),
+		Color = Color3.new(0.6392157077789307, 0.6352941393852234, 0.6470588445663452),
+		Material = Enum.Material.Slate,
+		VertexColor = Vector3.new(1, 1, 1),
+		AttachmentPosition = Vector3.new(0, -0.20000000298023224, 0.08990859985351562),
+		AttachmentOrientation = Vector3.new(-50.001827239990234, 0, 0),
+	},
+
+	["Evergun"] = {
+		Type = "Gun",
+		Placement = "WaistRight",
+		MeshId = "rbxassetid://15408863676",
+		TextureId = "rbxassetid://15408849730",
+		Scale = Vector3.new(0.019999999552965164, 0.019999999552965164, 0.019999999552965164),
+		Offset = Vector3.new(0, 0, 0),
+		Color = Color3.new(0.6392157077789307, 0.6352941393852234, 0.6470588445663452),
+		Material = Enum.Material.Plastic,
+		VertexColor = Vector3.new(1, 1, 1),
+		AttachmentPosition = Vector3.new(0, -0.20000000298023224, 0.08990859985351562),
+		AttachmentOrientation = Vector3.new(-50.001827239990234, 0, 0),
+	},
+
+	["Bauble"] = {
+		Type = "Gun",
+		Placement = "WaistRight",
+		MeshId = "rbxassetid://107813118898769",
+		TextureId = "rbxassetid://137012201908941",
+		Scale = Vector3.new(0.05000000074505806, 0.05000000074505806, 0.05000000074505806),
+		Offset = Vector3.new(0, 0, 0),
+		Color = Color3.new(0.6392157077789307, 0.6352941393852234, 0.6470588445663452),
+		Material = Enum.Material.Plastic,
+		VertexColor = Vector3.new(1, 1, 1),
+		AttachmentPosition = Vector3.new(0, 0, 0),
+		AttachmentOrientation = Vector3.new(0, 0, 0),
+	},
+}
+
+WeaponPackRuntime.CHROMA_GUN_BASE = {
+	["Chroma Treat"] = "Treat",
+	["Chroma Snowcannon"] = "Snowcannon",
+	["Chroma Watergun"] = "Watergun",
+	["Chroma Blizzard"] = "Blizzard",
+	["Chroma Raygun"] = "Raygun",
+	["Chroma Sunrise"] = "Sunrise",
+	["Chroma Vampire's Gun"] = "Vampire's Gun",
+	["Chroma Constellation"] = "Constellation",
+	["Chroma Evergun"] = "Evergun",
+	["Chroma Bauble"] = "Bauble",
+}
+
+WeaponPackRuntime.FAILED_GUN_LOOKUPS =
+	WeaponPackRuntime.FAILED_GUN_LOOKUPS or {}
+
+
+local function normalizeWeaponName(value)
+	value = string.lower(tostring(value or ""))
+	value = value:gsub("[’']", "")
+	value = value:gsub("[^%w]", "")
+	return value
+end
+
+local function isWeaponNameMatch(objectName, wantedName)
+	local objectNormalized = normalizeWeaponName(objectName)
+
+	for _, alias in ipairs(
+		WEAPON_ALIASES[wantedName] or {wantedName}
+	) do
+		if objectNormalized == normalizeWeaponName(alias) then
+			return true
+		end
+	end
+
+	return false
+end
+
+
+--------------------------------------------------
+-- DEEP CURRENT-MM2 VISUAL LOOKUP
+--
+-- FIX2:
+--   * keeps MM2's INTERNAL weapon key from Sync.Weapons
+--   * tries thread-identity-safe require for Database.Sync
+--   * searches getgc() tables BY KEY as well as by Name fields
+--   * can READ MeshPart source visuals safely
+--   * never writes MeshPart.MeshId on the player's weapon
+--------------------------------------------------
+
+WeaponPackRuntime.RUNTIME_WEAPON_VISUAL_CACHE =
+	WeaponPackRuntime.RUNTIME_WEAPON_VISUAL_CACHE or {}
+
+WeaponPackRuntime.SYNC_MATCH_CACHE =
+	WeaponPackRuntime.SYNC_MATCH_CACHE or {}
+
+WeaponPackRuntime.MM2_SYNC =
+	WeaponPackRuntime.MM2_SYNC or nil
+
+WeaponPackRuntime.MM2_SYNC_TRIED =
+	WeaponPackRuntime.MM2_SYNC_TRIED or false
+
+function WeaponPackRuntime.assetId(value)
+	if value == nil then
+		return nil
+	end
+
+	local number =
+		tostring(value):match("(%d+)")
+
+	if not number then
+		return nil
+	end
+
+	return "rbxassetid://" .. number
+end
+
+function WeaponPackRuntime.v3(value, defaultValue)
+	if typeof(value) == "Vector3" then
+		return value
+	end
+
+	if type(value) == "table" then
+		local x =
+			tonumber(value.X or value.x or value[1])
+
+		local y =
+			tonumber(value.Y or value.y or value[2])
+
+		local z =
+			tonumber(value.Z or value.z or value[3])
+
+		if x and y and z then
+			return Vector3.new(x, y, z)
+		end
+	end
+
+	return defaultValue
+end
+
+function WeaponPackRuntime.wantedIsChroma(name)
+	return string.sub(
+		normalizeWeaponName(name),
+		1,
+		6
+	) == "chroma"
+end
+
+function WeaponPackRuntime.withoutChroma(name)
+	local normalized =
+		normalizeWeaponName(name)
+
+	if string.sub(normalized, 1, 6) == "chroma" then
+		return string.sub(normalized, 7)
+	end
+
+	return normalized
+end
+
+function WeaponPackRuntime.safeRequire(moduleScript)
+	if not moduleScript
+		or not moduleScript:IsA("ModuleScript") then
+
+		return false, nil
+	end
+
+	local setter =
+		setthreadidentity
+		or set_thread_identity
+		or setidentity
+
+	local getter =
+		getthreadidentity
+		or get_thread_identity
+		or getidentity
+
+	local oldIdentity = nil
+
+	if type(getter) == "function" then
+		pcall(function()
+			oldIdentity = getter()
+		end)
+	end
+
+	if type(setter) == "function" then
+		pcall(function()
+			setter(2)
+		end)
+	end
+
+	local ok, result =
+		pcall(require, moduleScript)
+
+	if type(setter) == "function" then
+		pcall(function()
+			setter(oldIdentity or 8)
+		end)
+	end
+
+	return ok, result
+end
+
+function WeaponPackRuntime.getMM2Sync()
+	if WeaponPackRuntime.MM2_SYNC_TRIED then
+		return WeaponPackRuntime.MM2_SYNC
+	end
+
+	WeaponPackRuntime.MM2_SYNC_TRIED = true
+
+	local database =
+		ReplicatedStorage:FindFirstChild("Database")
+
+	local syncModule =
+		database
+		and database:FindFirstChild("Sync")
+
+	if not syncModule then
+		return nil
+	end
+
+	local ok, result =
+		WeaponPackRuntime.safeRequire(
+			syncModule
+		)
+
+	if ok
+		and type(result) == "table" then
+
+		WeaponPackRuntime.MM2_SYNC =
+			result
+	end
+
+	return WeaponPackRuntime.MM2_SYNC
+end
+
+function WeaponPackRuntime.getSyncSource()
+	local sync =
+		WeaponPackRuntime.getMM2Sync()
+
+	if type(sync) ~= "table" then
+		return nil
+	end
+
+	return
+		type(sync.Weapons) == "table"
+			and sync.Weapons
+		or type(sync.Item) == "table"
+			and sync.Item
+		or type(sync.Items) == "table"
+			and sync.Items
+		or sync
+end
+
+function WeaponPackRuntime.resolveSyncRecord(wantedName)
+	local cached =
+		WeaponPackRuntime.SYNC_MATCH_CACHE[
+			wantedName
+		]
+
+	if cached then
+		return cached
+	end
+
+	local source =
+		WeaponPackRuntime.getSyncSource()
+
+	if type(source) ~= "table" then
+		return nil
+	end
+
+	local target =
+		WeaponPackRuntime.withoutChroma(
+			wantedName
+		)
+
+	local wantChroma =
+		WeaponPackRuntime.wantedIsChroma(
+			wantedName
+		)
+
+	local expectedType =
+		WeaponPackRuntime.WEAPON_TYPE_HINTS[
+			wantedName
+		]
+
+	local expectedYear =
+		WeaponPackRuntime.WEAPON_YEAR_HINTS[
+			wantedName
+		]
+
+	local bestRecord = nil
+	local bestScore = -math.huge
+
+	for key, data in pairs(source) do
+		if type(data) == "table" then
+			local itemName =
+				tostring(
+					data.ItemName
+					or data.DisplayName
+					or data.Name
+					or key
+					or ""
+				)
+
+			local sameName =
+				WeaponPackRuntime.withoutChroma(
+					itemName
+				) == target
+
+				or isWeaponNameMatch(
+					itemName,
+					wantedName
+				)
+
+			if sameName then
+				local itemType =
+					tostring(
+						data.ItemType
+						or data.Type
+						or data.WeaponType
+						or ""
+					)
+
+				local typeOkay =
+					expectedType == nil
+					or itemType == ""
+					or string.lower(itemType)
+						== string.lower(
+							expectedType
+						)
+
+				if typeOkay then
+					local chroma =
+						data.Chroma == true
+						or data.IsChroma == true
+						or string.lower(
+							tostring(
+								data.Rarity or ""
+							)
+						) == "chroma"
+
+					local score = 100
+
+					if chroma == wantChroma then
+						score += 120
+					elseif wantChroma then
+						score -= 150
+					end
+
+					local year =
+						tonumber(
+							data.Year
+							or data.EventYear
+							or data.ReleaseYear
+						)
+
+					if expectedYear
+						and year == expectedYear then
+
+						score += 45
+					end
+
+					if score > bestScore then
+						bestScore = score
+
+						bestRecord = {
+							key = key,
+							data = data,
+							chroma = chroma,
+							itemName = itemName,
+						}
+					end
+				end
+			end
+		end
+	end
+
+	if bestRecord then
+		WeaponPackRuntime.SYNC_MATCH_CACHE[
+			wantedName
+		] = bestRecord
+	end
+
+	return bestRecord
+end
+
+function WeaponPackRuntime.resolveSyncEntry(wantedName)
+	local record =
+		WeaponPackRuntime.resolveSyncRecord(
+			wantedName
+		)
+
+	return record
+		and record.data
+		or nil
+end
+
+function WeaponPackRuntime.buildCandidateNames(
+	wantedName,
+	syncRecord
+)
+	local normalized = {}
+	local raw = {}
+
+	local function add(value)
+		if type(value) ~= "string"
+			or value == "" then
+
+			return
+		end
+
+		raw[value] = true
+		normalized[
+			normalizeWeaponName(value)
+		] = true
+	end
+
+	for _, alias in ipairs(
+		WEAPON_ALIASES[wantedName]
+		or {wantedName}
+	) do
+		add(alias)
+	end
+
+	add(wantedName)
+
+	if syncRecord then
+		add(tostring(syncRecord.key or ""))
+
+		local data =
+			syncRecord.data
+
+		if type(data) == "table" then
+			for _, field in ipairs({
+				"ItemName",
+				"DisplayName",
+				"Name",
+				"ModelName",
+				"AssetName",
+				"WeaponName",
+				"ItemID",
+				"ID",
+			}) do
+				local value =
+					data[field]
+
+				if type(value) == "string" then
+					add(value)
+				end
+			end
+		end
+	end
+
+	-- Common internal-name variants.
+	local base =
+		WeaponPackRuntime.withoutChroma(
+			wantedName
+		)
+
+	for rawName in pairs(raw) do
+		add(
+			string.gsub(
+				rawName,
+				"%s+",
+				""
+			)
+		)
+
+		add(
+			string.gsub(
+				rawName,
+				"%s+",
+				"_"
+			)
+		)
+	end
+
+	if WeaponPackRuntime.wantedIsChroma(
+		wantedName
+	) then
+		add("Chroma" .. base)
+		add("Chroma_" .. base)
+	end
+
+	return normalized, raw
+end
+
+function WeaponPackRuntime.extractVisualTable(
+	value,
+	defaultType,
+	wantedName,
+	depth,
+	seen
+)
+	if type(value) ~= "table" then
+		return nil
+	end
+
+	depth = depth or 0
+	seen = seen or {}
+
+	if depth > 7
+		or seen[value] then
+
+		return nil
+	end
+
+	seen[value] = true
+
+	local meshId =
+		value.MeshId
+		or value.MeshID
+		or value.Mesh
+		or value.meshId
+		or value.meshID
+
+	if meshId
+		and WeaponPackRuntime.assetId(
+			meshId
+		) then
+
+		local textureCandidate =
+			value.TextureId
+			or value.TextureID
+			or value.Texture
+			or value.textureId
+			or value.textureID
+
+		-- If we asked for a chroma and this visual table exposes a
+		-- chroma texture, use it while keeping the same mesh.
+		if wantedName
+			and WeaponPackRuntime.wantedIsChroma(
+				wantedName
+			) then
+
+			textureCandidate =
+				value.ChromaTexture
+				or value.ChromaTextureId
+				or value.ChromaTextureID
+				or textureCandidate
+		end
+
+		return {
+			Type =
+				value.Type
+				or value.ItemType
+				or defaultType
+				or "Knife",
+
+			Placement =
+				value.Placement,
+
+			MeshId =
+				WeaponPackRuntime.assetId(
+					meshId
+				),
+
+			TextureId =
+				WeaponPackRuntime.assetId(
+					textureCandidate
+				)
+				or "",
+
+			Scale =
+				WeaponPackRuntime.v3(
+					value.Scale,
+					Vector3.new(1, 1, 1)
+				),
+
+			Offset =
+				WeaponPackRuntime.v3(
+					value.Offset,
+					Vector3.zero
+				),
+
+			AttachmentPosition =
+				WeaponPackRuntime.v3(
+					value.AttachmentPosition,
+					Vector3.zero
+				),
+
+			AttachmentOrientation =
+				WeaponPackRuntime.v3(
+					value.AttachmentOrientation,
+					Vector3.zero
+				),
+
+			Color =
+				typeof(value.Color) == "Color3"
+				and value.Color
+				or nil,
+
+			Material =
+				typeof(value.Material) == "EnumItem"
+				and value.Material
+				or nil,
+
+			Transparency =
+				type(value.Transparency) == "number"
+				and value.Transparency
+				or nil,
+
+			Reflectance =
+				type(value.Reflectance) == "number"
+				and value.Reflectance
+				or nil,
+
+			VertexColor =
+				typeof(value.VertexColor) == "Vector3"
+				and value.VertexColor
+				or nil,
+
+			Source = "loaded visual table",
+		}
+	end
+
+	for _, key in ipairs({
+		"Visual",
+		"Visuals",
+		"WeaponVisual",
+		"WeaponVisuals",
+		"MeshData",
+		"Display",
+		"Asset",
+		"Assets",
+		"Model",
+	}) do
+		local child =
+			rawget(value, key)
+
+		if type(child) == "table" then
+			local result =
+				WeaponPackRuntime.extractVisualTable(
+					child,
+					defaultType,
+					wantedName,
+					depth + 1,
+					seen
+				)
+
+			if result then
+				return result
+			end
+		end
+	end
+
+	for _, child in pairs(value) do
+		if type(child) == "table" then
+			local result =
+				WeaponPackRuntime.extractVisualTable(
+					child,
+					defaultType,
+					wantedName,
+					depth + 1,
+					seen
+				)
+
+			if result then
+				return result
+			end
+		end
+	end
+
+	return nil
+end
+
+function WeaponPackRuntime.meshPartScale(meshPart)
+	if not meshPart
+		or not meshPart:IsA("MeshPart") then
+
+		return Vector3.new(1, 1, 1)
+	end
+
+	local meshSize = nil
+
+	pcall(function()
+		meshSize = meshPart.MeshSize
+	end)
+
+	if typeof(meshSize) == "Vector3"
+		and meshSize.X ~= 0
+		and meshSize.Y ~= 0
+		and meshSize.Z ~= 0 then
+
+		return Vector3.new(
+			meshPart.Size.X / meshSize.X,
+			meshPart.Size.Y / meshSize.Y,
+			meshPart.Size.Z / meshSize.Z
+		)
+	end
+
+	-- Fallback if MeshSize is not readable in this client.
+	return meshPart.Size
+end
+
+function WeaponPackRuntime.extractInstanceVisual(
+	instance,
+	defaultType
+)
+	if not instance then
+		return nil
+	end
+
+	local part = nil
+
+	if instance:IsA("Tool") then
+		part =
+			instance:FindFirstChild("Handle")
+			or instance:FindFirstChildWhichIsA(
+				"BasePart",
+				true
+			)
+
+	elseif instance:IsA("Model") then
+		part =
+			instance:FindFirstChild(
+				"Handle",
+				true
+			)
+			or instance:FindFirstChildWhichIsA(
+				"BasePart",
+				true
+			)
+
+	elseif instance:IsA("BasePart") then
+		part = instance
+	end
+
+	if not part then
+		return nil
+	end
+
+	-- Best case: normal Part + SpecialMesh.
+	local specialMesh =
+		part:FindFirstChildWhichIsA(
+			"SpecialMesh"
+		)
+
+	if specialMesh
+		and WeaponPackRuntime.assetId(
+			specialMesh.MeshId
+		) then
+
+		return {
+			Type = defaultType or "Knife",
+			MeshId =
+				WeaponPackRuntime.assetId(
+					specialMesh.MeshId
+				),
+			TextureId =
+				WeaponPackRuntime.assetId(
+					specialMesh.TextureId
+				)
+				or "",
+			Scale = specialMesh.Scale,
+			Offset = specialMesh.Offset,
+			Color = part.Color,
+			Material = part.Material,
+			Transparency = part.Transparency,
+			Reflectance = part.Reflectance,
+			VertexColor = specialMesh.VertexColor,
+			Source = "loaded SpecialMesh",
+		}
+	end
+
+	-- IMPORTANT:
+	-- Reading MeshPart.MeshId is safe.
+	-- The old giant-weapon bug came from WRITING MeshPart.MeshId on
+	-- the player's current weapon. We still never do that.
+	if part:IsA("MeshPart")
+		and WeaponPackRuntime.assetId(
+			part.MeshId
+		) then
+
+		return {
+			Type = defaultType or "Knife",
+			MeshId =
+				WeaponPackRuntime.assetId(
+					part.MeshId
+				),
+			TextureId =
+				WeaponPackRuntime.assetId(
+					part.TextureID
+				)
+				or "",
+			Scale =
+				WeaponPackRuntime.meshPartScale(
+					part
+				),
+			Offset = Vector3.zero,
+			Color = part.Color,
+			Material = part.Material,
+			Transparency = part.Transparency,
+			Reflectance = part.Reflectance,
+			Source = "loaded MeshPart",
+		}
+	end
+
+	-- A model may have a non-Handle MeshPart even if the first BasePart
+	-- wasn't the visual.
+	if instance:IsA("Model")
+		or instance:IsA("Tool") then
+
+		for _, descendant in ipairs(
+			instance:GetDescendants()
+		) do
+			if descendant:IsA("MeshPart")
+				and WeaponPackRuntime.assetId(
+					descendant.MeshId
+				) then
+
+				return {
+					Type = defaultType or "Knife",
+					MeshId =
+						WeaponPackRuntime.assetId(
+							descendant.MeshId
+						),
+					TextureId =
+						WeaponPackRuntime.assetId(
+							descendant.TextureID
+						)
+						or "",
+					Scale =
+						WeaponPackRuntime.meshPartScale(
+							descendant
+						),
+					Offset = Vector3.zero,
+					Color = descendant.Color,
+					Material = descendant.Material,
+					Transparency =
+						descendant.Transparency,
+					Reflectance =
+						descendant.Reflectance,
+					Source =
+						"loaded model MeshPart",
+				}
+			end
+		end
+	end
+
+	return nil
+end
+
+function WeaponPackRuntime.findVisualInMappingTable(
+	container,
+	wantedName,
+	expectedType,
+	syncRecord
+)
+	if type(container) ~= "table" then
+		return nil
+	end
+
+	local normalizedNames, rawNames =
+		WeaponPackRuntime.buildCandidateNames(
+			wantedName,
+			syncRecord
+		)
+
+	-- Fast exact raw-key lookups first.
+	for rawName in pairs(rawNames) do
+		local value =
+			rawget(
+				container,
+				rawName
+			)
+
+		if type(value) == "table" then
+			local visual =
+				WeaponPackRuntime.extractVisualTable(
+					value,
+					expectedType,
+					wantedName
+				)
+
+			if visual then
+				return visual
+			end
+		end
+	end
+
+	-- Then normalized string-key comparison.
+	local checked = 0
+
+	for key, value in pairs(container) do
+		checked += 1
+
+		if checked > 1800 then
+			break
+		end
+
+		if type(key) == "string"
+			and type(value) == "table"
+			and normalizedNames[
+				normalizeWeaponName(key)
+			] then
+
+			local visual =
+				WeaponPackRuntime.extractVisualTable(
+					value,
+					expectedType,
+					wantedName
+				)
+
+			if visual then
+				return visual
+			end
+		end
+	end
+
+	-- Common nested visual-map names.
+	for _, childKey in ipairs({
+		"WeaponVisuals",
+		"Weapons",
+		"Visuals",
+		"Items",
+		"WeaponData",
+	}) do
+		local child =
+			rawget(
+				container,
+				childKey
+			)
+
+		if type(child) == "table" then
+			local visual =
+				WeaponPackRuntime.findVisualInMappingTable(
+					child,
+					wantedName,
+					expectedType,
+					syncRecord
+				)
+
+			if visual then
+				return visual
+			end
+		end
+	end
+
+	return nil
+end
+
+function WeaponPackRuntime.searchLoadedGCTables(
+	wantedName,
+	expectedType,
+	syncRecord
+)
+	if type(getgc) ~= "function" then
+		return nil
+	end
+
+	local ok, objects =
+		pcall(getgc, true)
+
+	if not ok
+		or type(objects) ~= "table" then
+
+		return nil
+	end
+
+	local target =
+		WeaponPackRuntime.withoutChroma(
+			wantedName
+		)
+
+	local wantChroma =
+		WeaponPackRuntime.wantedIsChroma(
+			wantedName
+		)
+
+	local checked = 0
+
+	for _, object in ipairs(objects) do
+		checked += 1
+
+		if checked % 500 == 0 then
+			task.wait()
+		end
+
+		if checked > 18000 then
+			break
+		end
+
+		if type(object) == "table" then
+			-- THIS is the big fix:
+			-- weapon visual data is often a map:
+			-- WeaponVisuals["Xenoknife"] = { MeshId = ... }
+			local mapped =
+				WeaponPackRuntime.findVisualInMappingTable(
+					object,
+					wantedName,
+					expectedType,
+					syncRecord
+				)
+
+			if mapped then
+				mapped.Source =
+					"getgc visual map"
+
+				return mapped
+			end
+
+			-- Also support a table that is itself one item record.
+			local name =
+				object.ItemName
+				or object.DisplayName
+				or object.Name
+
+			if type(name) == "string"
+				and WeaponPackRuntime.withoutChroma(
+					name
+				) == target then
+
+				local chroma =
+					object.Chroma == true
+					or object.IsChroma == true
+					or string.lower(
+						tostring(
+							object.Rarity or ""
+						)
+					) == "chroma"
+
+				if chroma == wantChroma
+					or not wantChroma then
+
+					local visual =
+						WeaponPackRuntime.extractVisualTable(
+							object,
+							expectedType,
+							wantedName
+						)
+
+					if visual then
+						visual.Source =
+							"getgc item table"
+
+						return visual
+					end
+				end
+			end
+		end
+	end
+
+	return nil
+end
+
+function WeaponPackRuntime.searchLoadedModules(
+	wantedName,
+	expectedType,
+	syncRecord
+)
+	if type(getloadedmodules)
+		~= "function" then
+
+		return nil
+	end
+
+	local ok, modules =
+		pcall(getloadedmodules)
+
+	if not ok
+		or type(modules) ~= "table" then
+
+		return nil
+	end
+
+	local normalizedNames =
+		WeaponPackRuntime.buildCandidateNames(
+			wantedName,
+			syncRecord
+		)
+
+	local checked = 0
+
+	for _, moduleScript in ipairs(modules) do
+		checked += 1
+
+		if checked > 1200 then
+			break
+		end
+
+		if typeof(moduleScript) == "Instance"
+			and moduleScript:IsA("ModuleScript")
+			and moduleScript:IsDescendantOf(
+				ReplicatedStorage
+			) then
+
+			local normalizedModuleName =
+				normalizeWeaponName(
+					moduleScript.Name
+				)
+
+			local looksRelevant =
+				normalizedNames[
+					normalizedModuleName
+				]
+				or string.find(
+					normalizedModuleName,
+					"weapon",
+					1,
+					true
+				)
+				or string.find(
+					normalizedModuleName,
+					"visual",
+					1,
+					true
+				)
+
+			if looksRelevant then
+				local reqOk, result =
+					WeaponPackRuntime.safeRequire(
+						moduleScript
+					)
+
+				if reqOk
+					and type(result) == "table" then
+
+					local visual =
+						WeaponPackRuntime.findVisualInMappingTable(
+							result,
+							wantedName,
+							expectedType,
+							syncRecord
+						)
+						or WeaponPackRuntime.extractVisualTable(
+							result,
+							expectedType,
+							wantedName
+						)
+
+					if visual then
+						visual.Source =
+							"loaded ModuleScript"
+
+						return visual
+					end
+				end
+			end
+		end
+	end
+
+	return nil
+end
+
+function WeaponPackRuntime.searchReplicatedStorage(
+	wantedName,
+	expectedType,
+	syncRecord
+)
+	local normalizedNames =
+		WeaponPackRuntime.buildCandidateNames(
+			wantedName,
+			syncRecord
+		)
+
+	local roots = {}
+
+	for _, rootName in ipairs({
+		"Weapons",
+		"Weapon",
+		"WeaponModels",
+		"Items",
+		"Assets",
+		"Models",
+		"Resources",
+		"Inventory",
+		"Database",
+	}) do
+		local root =
+			ReplicatedStorage:FindFirstChild(
+				rootName
+			)
+
+		if root then
+			table.insert(roots, root)
+		end
+	end
+
+	table.insert(
+		roots,
+		ReplicatedStorage
+	)
+
+	local seen = {}
+	local visited = 0
+
+	for _, root in ipairs(roots) do
+		for _, object in ipairs(
+			root:GetDescendants()
+		) do
+			if seen[object] then
+				continue
+			end
+
+			seen[object] = true
+			visited += 1
+
+			if visited % 500 == 0 then
+				task.wait()
+			end
+
+			if visited > 22000 then
+				break
+			end
+
+			local normalizedObject =
+				normalizeWeaponName(
+					object.Name
+				)
+
+			if normalizedNames[
+				normalizedObject
+			] then
+
+				local visual =
+					WeaponPackRuntime.extractInstanceVisual(
+						object,
+						expectedType
+					)
+
+				if visual then
+					visual.Source =
+						"ReplicatedStorage model"
+
+					return visual
+				end
+			end
+		end
+	end
+
+	return nil
+end
+
+function WeaponPackRuntime.resolveRuntimeWeaponVisual(
+	wantedName
+)
+	-- Working-guns build: all remaining guns have exact data.
+	-- Deep runtime scanning is disabled to keep the game lightweight.
+	return nil
+end
+
+
+local function findActualWeaponAsset(wantedName)
+	local syncRecord =
+		WeaponPackRuntime.resolveSyncRecord(
+			wantedName
+		)
+
+	local normalizedNames =
+		WeaponPackRuntime.buildCandidateNames(
+			wantedName,
+			syncRecord
+		)
+
+	local function matches(object)
+		return object
+			and normalizedNames[
+				normalizeWeaponName(
+					object.Name
+				)
+			] == true
+	end
+
+	local function searchContainer(container)
+		if not container then
+			return nil
+		end
+
+		for _, object in ipairs(
+			container:GetDescendants()
+		) do
+			if matches(object)
+				and (
+					object:IsA("Tool")
+					or object:IsA("Model")
+					or object:IsA("MeshPart")
+					or object:IsA("Part")
+				) then
+
+				return object
+			end
+		end
+
+		return nil
+	end
+
+	return
+		searchContainer(player.Character)
+		or searchContainer(
+			player:FindFirstChildOfClass(
+				"Backpack"
+			)
+		)
+		or searchContainer(
+			ReplicatedStorage
+		)
+end
+
+function WeaponPackRuntime.makeVisualTool(name, visual)
+	if not visual or not visual.MeshId then return nil end
+	local tool = Instance.new("Tool")
+	tool.Name = name
+	tool.RequiresHandle = true
+	tool.CanBeDropped = false
+
+	local handle = Instance.new("Part")
+	handle.Name = "Handle"
+	handle.Size = Vector3.new(1,1,1)
+	handle.CanCollide = false
+	handle.CanTouch = false
+	handle.CanQuery = false
+	handle.Massless = true
+	handle.Parent = tool
+
+	local mesh = Instance.new("SpecialMesh")
+	mesh.MeshType = Enum.MeshType.FileMesh
+	mesh.MeshId = visual.MeshId
+	mesh.TextureId = visual.TextureId or ""
+	mesh.Scale = visual.Scale or Vector3.new(1,1,1)
+	mesh.Offset = visual.Offset or Vector3.zero
+	mesh.Parent = handle
+	return tool
+end
+
+local function makeFallbackVisualTool(name)
+	return WeaponPackRuntime.makeVisualTool(name,FALLBACK_WEAPON_VISUALS[name])
+end
+
+local function cloneWeaponAsTool(wantedName)
+	-- PERFORMANCE:
+	-- Bot cosmetics never trigger the deep search.
+	-- They use verified or already-cached visuals only.
+	local exact =
+		FALLBACK_WEAPON_VISUALS[
+			wantedName
+		]
+
+	if exact then
+		return WeaponPackRuntime.makeVisualTool(
+			wantedName,
+			exact
+		)
+	end
+
+	local cached =
+		WeaponPackRuntime.RUNTIME_WEAPON_VISUAL_CACHE[
+			wantedName
+		]
+
+	if cached then
+		return WeaponPackRuntime.makeVisualTool(
+			wantedName,
+			cached
+		)
+	end
+
+	local baseName =
+		WeaponPackRuntime.CHROMA_GUN_BASE[
+			wantedName
+		]
+
+	local base =
+		baseName
+		and FALLBACK_WEAPON_VISUALS[
+			baseName
+		]
+
+	if base then
+		return WeaponPackRuntime.makeVisualTool(
+			wantedName,
+			base
+		)
+	end
+
+	return nil
+end
+
+
+--------------------------------------------------
+-- UI
+--------------------------------------------------
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "BotController"
+gui.ResetOnSpawn = false
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, 360, 0, 520)
+main.Position = UDim2.new(0.5, -180, 0.5, -260)
+main.BackgroundColor3 = Color3.fromRGB(10, 10, 13)
+main.BorderSizePixel = 0
+main.Parent = gui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 14)
+corner.Parent = main
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(168, 168, 182)
+stroke.Thickness = 1.2
+stroke.Parent = main
+
+--------------------------------------------------
+-- DRAGGING
+--------------------------------------------------
+
+local dragging = false
+local dragStart
+local startPosition
+
+main.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragging = true
+		dragStart = input.Position
+		startPosition = main.Position
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+		local delta = input.Position - dragStart
+
+		main.Position = UDim2.new(
+			startPosition.X.Scale,
+			startPosition.X.Offset + delta.X,
+			startPosition.Y.Scale,
+			startPosition.Y.Offset + delta.Y
+		)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragging = false
+	end
+end)
+
+--------------------------------------------------
+-- TITLE
+--------------------------------------------------
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -135, 0, 40)
+title.Position = UDim2.new(0, 24, 0, 10)
+title.BackgroundTransparency = 1
+title.Text = "SLAVE CONTROLLER"
+title.TextColor3 = Color3.new(1, 1, 1)
+title.TextSize = 20
+title.Font = Enum.Font.GothamBold
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = main
+
+local topOrnament = Instance.new("TextLabel")
+topOrnament.Size = UDim2.new(0, 120, 0, 18)
+topOrnament.Position = UDim2.new(0.5, -60, 0, 2)
+topOrnament.BackgroundTransparency = 1
+topOrnament.Text = "⸸  ·  ⛧  ·  ⸸"
+topOrnament.TextColor3 = Color3.fromRGB(125, 125, 138)
+topOrnament.TextSize = 12
+topOrnament.Font = Enum.Font.GothamSemibold
+topOrnament.TextXAlignment = Enum.TextXAlignment.Center
+topOrnament.Parent = main
+
+local leftThorn = Instance.new("TextLabel")
+leftThorn.Size = UDim2.new(0, 18, 1, -34)
+leftThorn.Position = UDim2.new(0, 2, 0, 18)
+leftThorn.BackgroundTransparency = 1
+leftThorn.Text = "⟡\n│\n✧\n│\n⟡\n│\n✧\n│\n⟡"
+leftThorn.TextColor3 = Color3.fromRGB(72, 72, 84)
+leftThorn.TextSize = 11
+leftThorn.Font = Enum.Font.Gotham
+leftThorn.TextWrapped = true
+leftThorn.Parent = main
+
+local rightThorn = Instance.new("TextLabel")
+rightThorn.Size = UDim2.new(0, 18, 1, -34)
+rightThorn.Position = UDim2.new(1, -20, 0, 18)
+rightThorn.BackgroundTransparency = 1
+rightThorn.Text = "⟡\n│\n✧\n│\n⟡\n│\n✧\n│\n⟡"
+rightThorn.TextColor3 = Color3.fromRGB(72, 72, 84)
+rightThorn.TextSize = 11
+rightThorn.Font = Enum.Font.Gotham
+rightThorn.TextWrapped = true
+rightThorn.Parent = main
+
+local bapLabel = Instance.new("TextLabel")
+bapLabel.Size = UDim2.new(0, 90, 0, 28)
+bapLabel.Position = UDim2.new(1, -116, 0, 13)
+bapLabel.BackgroundTransparency = 1
+bapLabel.Text = "Bap ⛧"
+bapLabel.TextColor3 = Color3.fromRGB(215, 215, 225)
+bapLabel.TextSize = 14
+bapLabel.Font = Enum.Font.GothamSemibold
+bapLabel.TextXAlignment = Enum.TextXAlignment.Right
+bapLabel.ZIndex = 5
+bapLabel.Parent = main
+
+--------------------------------------------------
+-- STATUS
+--------------------------------------------------
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -36, 0, 22)
+status.Position = UDim2.new(0, 18, 0, 46)
+status.BackgroundTransparency = 1
+status.Text = "● STOPPED"
+status.TextColor3 = Color3.fromRGB(255, 80, 80)
+status.TextSize = 14
+status.Font = Enum.Font.Gotham
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.Parent = main
+
+--------------------------------------------------
+-- BUTTON CREATOR
+--------------------------------------------------
+
+local function createButton(text, position, size, parentOverride)
+	local button = Instance.new("TextButton")
+
+	button.Size = size or UDim2.new(1, -36, 0, 42)
+	button.Position = position
+	button.BackgroundColor3 = Color3.fromRGB(24, 24, 31)
+	button.BorderSizePixel = 0
+	button.Text = text
+	button.TextColor3 = Color3.fromRGB(232, 232, 238)
+	button.TextSize = 15
+	button.Font = Enum.Font.GothamSemibold
+	button.AutoButtonColor = true
+	button.Parent = parentOverride or main
+
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 7)
+	c.Parent = button
+
+	local s = Instance.new("UIStroke")
+	s.Color = Color3.fromRGB(95, 95, 110)
+	s.Thickness = 1
+	s.Transparency = 0.12
+	s.Parent = button
+
+	return button
+end
+
+--------------------------------------------------
+-- TABS
+--------------------------------------------------
+
+local botsTabButton = createButton(
+	"BOTS",
+	UDim2.new(0, 24, 0, 80),
+	UDim2.new(0, 150, 0, 36)
+)
+
+local weaponsTabButton = createButton(
+	"WEAPONS",
+	UDim2.new(0, 186, 0, 80),
+	UDim2.new(0, 150, 0, 36)
+)
+
+local botsPage = Instance.new("Frame")
+botsPage.Size = UDim2.new(1, -48, 1, -138)
+botsPage.Position = UDim2.new(0, 24, 0, 124)
+botsPage.BackgroundTransparency = 1
+botsPage.Parent = main
+
+local weaponsPage = Instance.new("Frame")
+weaponsPage.Size = UDim2.new(1, -48, 1, -138)
+weaponsPage.Position = UDim2.new(0, 24, 0, 124)
+weaponsPage.BackgroundTransparency = 1
+weaponsPage.Visible = false
+weaponsPage.Parent = main
+
+local function setActiveTab(tabName)
+	local botsActive =
+		tabName == "BOTS"
+
+	botsPage.Visible =
+		botsActive
+
+	weaponsPage.Visible =
+		not botsActive
+
+	botsTabButton.BackgroundColor3 =
+		botsActive
+		and Color3.fromRGB(65, 65, 80)
+		or Color3.fromRGB(24, 24, 31)
+
+	weaponsTabButton.BackgroundColor3 =
+		(not botsActive)
+		and Color3.fromRGB(65, 65, 80)
+		or Color3.fromRGB(24, 24, 31)
+end
+
+botsTabButton.MouseButton1Click:Connect(function()
+	setActiveTab("BOTS")
+end)
+
+weaponsTabButton.MouseButton1Click:Connect(function()
+	setActiveTab("WEAPONS")
+end)
+
+setActiveTab("BOTS")
+
+--------------------------------------------------
+-- BOTS TAB
+--------------------------------------------------
+
+local countLabel = Instance.new("TextLabel")
+countLabel.Size = UDim2.new(0, 180, 0, 35)
+countLabel.Position = UDim2.new(0, 0, 0, 0)
+countLabel.BackgroundTransparency = 1
+countLabel.TextColor3 = Color3.new(1, 1, 1)
+countLabel.TextSize = 15
+countLabel.Font = Enum.Font.GothamSemibold
+countLabel.TextXAlignment = Enum.TextXAlignment.Left
+countLabel.Text = "BOTS:  " .. botCount
+countLabel.Parent = botsPage
+
+local minusBots = createButton(
+	"-",
+	UDim2.new(0, 212, 0, 0),
+	UDim2.new(0, 42, 0, 35),
+	botsPage
+)
+
+local plusBots = createButton(
+	"+",
+	UDim2.new(0, 270, 0, 0),
+	UDim2.new(0, 42, 0, 35),
+	botsPage
+)
+
+local distanceLabel = Instance.new("TextLabel")
+distanceLabel.Size = UDim2.new(0, 180, 0, 35)
+distanceLabel.Position = UDim2.new(0, 0, 0, 45)
+distanceLabel.BackgroundTransparency = 1
+distanceLabel.TextColor3 = Color3.new(1, 1, 1)
+distanceLabel.TextSize = 15
+distanceLabel.Font = Enum.Font.GothamSemibold
+distanceLabel.TextXAlignment = Enum.TextXAlignment.Left
+distanceLabel.Text = "DISTANCE:  " .. followDistance
+distanceLabel.Parent = botsPage
+
+local minusDistance = createButton(
+	"-",
+	UDim2.new(0, 212, 0, 45),
+	UDim2.new(0, 42, 0, 35),
+	botsPage
+)
+
+local plusDistance = createButton(
+	"+",
+	UDim2.new(0, 270, 0, 45),
+	UDim2.new(0, 42, 0, 35),
+	botsPage
+)
+
+local addAvatarLabel = Instance.new("TextLabel")
+addAvatarLabel.Size = UDim2.new(1, 0, 0, 20)
+addAvatarLabel.Position = UDim2.new(0, 0, 0, 92)
+addAvatarLabel.BackgroundTransparency = 1
+addAvatarLabel.Text = "ADD AVATAR"
+addAvatarLabel.TextColor3 = Color3.new(1, 1, 1)
+addAvatarLabel.TextSize = 14
+addAvatarLabel.Font = Enum.Font.GothamSemibold
+addAvatarLabel.TextXAlignment = Enum.TextXAlignment.Left
+addAvatarLabel.Parent = botsPage
+
+local addAvatarBox = Instance.new("TextBox")
+addAvatarBox.Size = UDim2.new(1, -80, 0, 36)
+addAvatarBox.Position = UDim2.new(0, 0, 0, 116)
+addAvatarBox.BackgroundColor3 = Color3.fromRGB(38, 38, 47)
+addAvatarBox.BorderSizePixel = 0
+addAvatarBox.TextColor3 = Color3.new(1, 1, 1)
+addAvatarBox.PlaceholderColor3 = Color3.fromRGB(145, 145, 155)
+addAvatarBox.PlaceholderText = "Username or user ID"
+addAvatarBox.Text = ""
+addAvatarBox.TextSize = 14
+addAvatarBox.Font = Enum.Font.Gotham
+addAvatarBox.ClearTextOnFocus = false
+addAvatarBox.TextXAlignment = Enum.TextXAlignment.Left
+addAvatarBox.Parent = botsPage
+
+local addAvatarPadding = Instance.new("UIPadding")
+addAvatarPadding.PaddingLeft = UDim.new(0, 10)
+addAvatarPadding.PaddingRight = UDim.new(0, 10)
+addAvatarPadding.Parent = addAvatarBox
+
+local addAvatarCorner = Instance.new("UICorner")
+addAvatarCorner.CornerRadius = UDim.new(0, 9)
+addAvatarCorner.Parent = addAvatarBox
+
+local addAvatarButton = createButton(
+	"ADD",
+	UDim2.new(1, -68, 0, 116),
+	UDim2.new(0, 68, 0, 36),
+	botsPage
+)
+
+local addAvatarStatus = Instance.new("TextLabel")
+addAvatarStatus.Size = UDim2.new(1, 0, 0, 18)
+addAvatarStatus.Position = UDim2.new(0, 0, 0, 156)
+addAvatarStatus.BackgroundTransparency = 1
+addAvatarStatus.Text = ""
+addAvatarStatus.TextColor3 = Color3.fromRGB(170, 170, 180)
+addAvatarStatus.TextSize = 12
+addAvatarStatus.Font = Enum.Font.Gotham
+addAvatarStatus.TextXAlignment = Enum.TextXAlignment.Left
+addAvatarStatus.Parent = botsPage
+
+local startButton = createButton(
+	"SPAWN BOTS",
+	UDim2.new(0, 0, 0, 184),
+	UDim2.new(0, 150, 0, 42),
+	botsPage
+)
+
+local stopButton = createButton(
+	"DELETE BOTS",
+	UDim2.new(0, 162, 0, 184),
+	UDim2.new(0, 150, 0, 42),
+	botsPage
+)
+
+local chatButton = createButton(
+	"CHAT: ON",
+	UDim2.new(0, 0, 0, 236),
+	UDim2.new(1, 0, 0, 42),
+	botsPage
+)
+
+--------------------------------------------------
+-- WEAPONS TAB
+--------------------------------------------------
+
+local weaponLabel = Instance.new("TextLabel")
+weaponLabel.Size = UDim2.new(1, 0, 0, 24)
+weaponLabel.Position = UDim2.new(0, 0, 0, 0)
+weaponLabel.BackgroundTransparency = 1
+weaponLabel.Text = "YOUR WEAPON"
+weaponLabel.TextColor3 = Color3.new(1, 1, 1)
+weaponLabel.TextSize = 15
+weaponLabel.Font = Enum.Font.GothamSemibold
+weaponLabel.TextXAlignment = Enum.TextXAlignment.Left
+weaponLabel.Parent = weaponsPage
+
+local weaponBox = Instance.new("TextBox")
+weaponBox.Size = UDim2.new(1, -80, 0, 38)
+weaponBox.Position = UDim2.new(0, 0, 0, 32)
+weaponBox.BackgroundColor3 = Color3.fromRGB(38, 38, 47)
+weaponBox.BorderSizePixel = 0
+weaponBox.TextColor3 = Color3.new(1, 1, 1)
+weaponBox.PlaceholderColor3 = Color3.fromRGB(145, 145, 155)
+weaponBox.PlaceholderText = "Weapon name"
+weaponBox.Text = ""
+weaponBox.TextSize = 14
+weaponBox.Font = Enum.Font.Gotham
+weaponBox.ClearTextOnFocus = false
+weaponBox.TextXAlignment = Enum.TextXAlignment.Left
+weaponBox.Parent = weaponsPage
+
+local weaponPadding = Instance.new("UIPadding")
+weaponPadding.PaddingLeft = UDim.new(0, 10)
+weaponPadding.PaddingRight = UDim.new(0, 10)
+weaponPadding.Parent = weaponBox
+
+local weaponCorner = Instance.new("UICorner")
+weaponCorner.CornerRadius = UDim.new(0, 9)
+weaponCorner.Parent = weaponBox
+
+local equipWeaponButton = createButton(
+	"EQUIP",
+	UDim2.new(1, -68, 0, 32),
+	UDim2.new(0, 68, 0, 38),
+	weaponsPage
+)
+
+local removeWeaponButton = createButton(
+	"REMOVE WEAPON",
+	UDim2.new(0, 0, 0, 82),
+	UDim2.new(1, 0, 0, 36),
+	weaponsPage
+)
+
+local weaponStatus = Instance.new("TextLabel")
+weaponStatus.Size = UDim2.new(1, 0, 0, 20)
+weaponStatus.Position = UDim2.new(0, 0, 0, 130)
+weaponStatus.BackgroundTransparency = 1
+weaponStatus.Text = "Choose a configured weapon"
+weaponStatus.TextColor3 = Color3.fromRGB(170, 170, 180)
+weaponStatus.TextSize = 12
+weaponStatus.Font = Enum.Font.Gotham
+weaponStatus.TextXAlignment = Enum.TextXAlignment.Left
+weaponStatus.Parent = weaponsPage
+
+local weaponListTitle = Instance.new("TextLabel")
+weaponListTitle.Size = UDim2.new(1, 0, 0, 22)
+weaponListTitle.Position = UDim2.new(0, 0, 0, 158)
+weaponListTitle.BackgroundTransparency = 1
+weaponListTitle.Text = "WEAPON LIST"
+weaponListTitle.TextColor3 = Color3.new(1, 1, 1)
+weaponListTitle.TextSize = 14
+weaponListTitle.Font = Enum.Font.GothamSemibold
+weaponListTitle.TextXAlignment = Enum.TextXAlignment.Left
+weaponListTitle.Parent = weaponsPage
+
+WeaponPackRuntime.SelectedWeaponCategory = "Gun"
+
+WeaponPackRuntime.GunTabButton = createButton(
+	"GUN",
+	UDim2.new(0, 0, 0, 188),
+	UDim2.new(0, 150, 0, 34),
+	weaponsPage
+)
+
+WeaponPackRuntime.KnifeTabButton = createButton(
+	"KNIFE",
+	UDim2.new(0, 162, 0, 188),
+	UDim2.new(0, 150, 0, 34),
+	weaponsPage
+)
+
+local weaponListFrame = Instance.new("ScrollingFrame")
+weaponListFrame.Size = UDim2.new(1, 0, 0, 150)
+weaponListFrame.Position = UDim2.new(0, 0, 0, 230)
+weaponListFrame.BackgroundColor3 = Color3.fromRGB(31, 31, 38)
+weaponListFrame.BorderSizePixel = 0
+weaponListFrame.ScrollBarThickness = 5
+weaponListFrame.CanvasSize = UDim2.new(0,0,0,0)
+weaponListFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+weaponListFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+weaponListFrame.ElasticBehavior = Enum.ElasticBehavior.WhenScrollable
+weaponListFrame.Parent = weaponsPage
+
+local weaponListCorner = Instance.new("UICorner")
+weaponListCorner.CornerRadius = UDim.new(0, 10)
+weaponListCorner.Parent = weaponListFrame
+
+local weaponLayout = Instance.new("UIListLayout")
+weaponLayout.Padding = UDim.new(0, 7)
+weaponLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+weaponLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+weaponLayout.Parent = weaponListFrame
+
+local weaponListPadding = Instance.new("UIPadding")
+weaponListPadding.PaddingTop = UDim.new(0, 10)
+weaponListPadding.PaddingLeft = UDim.new(0, 10)
+weaponListPadding.PaddingRight = UDim.new(0, 10)
+weaponListPadding.PaddingBottom = UDim.new(0, 10)
+weaponListPadding.Parent = weaponListFrame
+
+local weaponButtons = {}
+
+-- Forward declaration is required because the weapon-list buttons are
+-- created before the equip function's implementation appears below.
+local equipPlayerWeapon
+
+local function rebuildWeaponButtons()
+	for _, button in ipairs(weaponButtons) do
+		button:Destroy()
+	end
+
+	table.clear(weaponButtons)
+
+	for _, weaponName in ipairs(WEAPON_LIST) do
+		local weaponType =
+			WeaponPackRuntime.WEAPON_TYPE_HINTS[
+				weaponName
+			]
+			or (
+				weaponName == "Harvester"
+				and "Gun"
+				or "Knife"
+			)
+
+		if weaponType
+			== WeaponPackRuntime.SelectedWeaponCategory then
+
+			local button = createButton(
+				weaponName,
+				UDim2.new(),
+				UDim2.new(1, 0, 0, 32),
+				weaponListFrame
+			)
+
+			button.TextSize = 13
+
+			button.MouseButton1Click:Connect(function()
+				weaponBox.Text = weaponName
+
+				weaponStatus.Text =
+					"Loading " ..
+					weaponName ..
+					"..."
+
+				weaponStatus.TextColor3 =
+					Color3.fromRGB(
+						200,
+						200,
+						210
+					)
+
+				if not equipPlayerWeapon then
+					weaponStatus.Text =
+						"Weapon equip function not ready"
+
+					weaponStatus.TextColor3 =
+						Color3.fromRGB(
+							255,
+							105,
+							105
+						)
+
+					return
+				end
+
+				local ok, err =
+					pcall(function()
+						equipPlayerWeapon(
+							weaponName
+						)
+					end)
+
+				if not ok then
+					weaponStatus.Text =
+						"Equip error: " ..
+						tostring(err)
+
+					weaponStatus.TextColor3 =
+						Color3.fromRGB(
+							255,
+							105,
+							105
+						)
+				end
+			end)
+
+			table.insert(
+				weaponButtons,
+				button
+			)
+		end
+	end
+
+	local gunActive =
+		WeaponPackRuntime.SelectedWeaponCategory
+		== "Gun"
+
+	WeaponPackRuntime.GunTabButton.BackgroundColor3 =
+		gunActive
+		and Color3.fromRGB(65, 65, 80)
+		or Color3.fromRGB(45, 45, 55)
+
+	WeaponPackRuntime.KnifeTabButton.BackgroundColor3 =
+		(not gunActive)
+		and Color3.fromRGB(65, 65, 80)
+		or Color3.fromRGB(45, 45, 55)
+
+	weaponListTitle.Text =
+		gunActive
+		and "GUNS"
+		or "KNIVES"
+
+	weaponListFrame.CanvasPosition =
+		Vector2.new(0, 0)
+end
+
+WeaponPackRuntime.GunTabButton.MouseButton1Click:Connect(function()
+	WeaponPackRuntime.SelectedWeaponCategory =
+		"Gun"
+
+	rebuildWeaponButtons()
+end)
+
+WeaponPackRuntime.KnifeTabButton.MouseButton1Click:Connect(function()
+	WeaponPackRuntime.SelectedWeaponCategory =
+		"Knife"
+
+	rebuildWeaponButtons()
+end)
+
+
+--------------------------------------------------
+-- HOLSTERED WEAPON VISUALS
+--------------------------------------------------
+
+local function clearHolsteredWeapon(character, modelName)
+	if not character then
+		return
+	end
+
+	local wantedModelName =
+		modelName or "HolsteredWeapon"
+
+	local old =
+		character:FindFirstChild(
+			wantedModelName
+		)
+
+	if old then
+		old:Destroy()
+	end
+end
+
+local function getHolsterTorso(character)
+	return character
+		and (
+			character:FindFirstChild("LowerTorso")
+			or character:FindFirstChild("Torso")
+			or character:FindFirstChild("UpperTorso")
+		)
+end
+
+local function prepareWeaponVisual(
+	source,
+	weaponName,
+	modelName
+)
+	if not source then
+		return nil
+	end
+
+	local model = Instance.new("Model")
+
+	model.Name =
+		modelName
+		or "HolsteredWeapon"
+
+	model:SetAttribute(
+		"WeaponName",
+		weaponName
+	)
+
+	if source:IsA("Tool") or source:IsA("Model") then
+		for _, child in ipairs(source:GetChildren()) do
+			child.Parent = model
+		end
+		source:Destroy()
+
+	elseif source:IsA("BasePart") then
+		source.Parent = model
+	else
+		source:Destroy()
+		model:Destroy()
+		return nil
+	end
+
+	local root =
+		model:FindFirstChild("Handle", true)
+		or model:FindFirstChildWhichIsA("BasePart", true)
+
+	if not root then
+		model:Destroy()
+		return nil
+	end
+
+	root.Name = "Handle"
+	model.PrimaryPart = root
+
+	for _, obj in ipairs(model:GetDescendants()) do
+		if obj:IsA("BasePart") then
+			obj.Anchored = false
+			obj.CanCollide = false
+			obj.CanTouch = false
+			obj.CanQuery = false
+			obj.Massless = true
+		end
+	end
+
+	-- Keep every visual part connected to the Handle.
+	for _, obj in ipairs(model:GetDescendants()) do
+		if obj:IsA("BasePart") and obj ~= root then
+			local weld = Instance.new("WeldConstraint")
+			weld.Part0 = root
+			weld.Part1 = obj
+			weld.Parent = root
+		end
+	end
+
+	return model
+end
+
+local WEAPON_HOLSTER_DATA = {
+	["Harvester"] = {
+		Placement = "WaistRight",
+
+		-- Exact attachment transform from the weapon visual data.
+		AttachmentPosition = Vector3.new(
+			0.1299028992652893,
+			0.000002229222218375071,
+			0.07500199228525162
+		),
+
+		AttachmentOrientation = Vector3.new(
+			-0.0026997302193194628,
+			-60,
+			90.00231170654297
+		),
+
+		-- Small final correction so it hugs the hip instead of crossing the torso.
+		Correction = CFrame.new(0.10, -0.16, 0.02)
+			* CFrame.Angles(
+				math.rad(0),
+				math.rad(0),
+				math.rad(-8)
+			),
+	},
+
+	["Gingerscope"] = {
+		Placement = "WaistRight",
+		Correction = CFrame.new(0.08, -0.18, 0.04)
+			* CFrame.Angles(0, math.rad(-5), math.rad(-10)),
+	},
+
+	["Chroma Sweet"] = {
+		Placement = "WaistLeft",
+		Correction = CFrame.new(-0.05, -0.16, 0.02)
+			* CFrame.Angles(0, math.rad(5), math.rad(8)),
+	},
+
+	["Chroma Treat"] = {
+		Placement = "WaistLeft",
+		Correction = CFrame.new(-0.05, -0.16, 0.02)
+			* CFrame.Angles(0, math.rad(5), math.rad(8)),
+	},
+
+	["Chroma Traveler's Gun"] = {
+		Placement = "WaistRight",
+		Correction = CFrame.new(0.08, -0.18, 0.04)
+			* CFrame.Angles(0, math.rad(-5), math.rad(-10)),
+	},
+}
+
+local function getPlacementAttachment(character, placement)
+	if not character then
+		return nil, nil
+	end
+
+	local lowerTorso =
+		character:FindFirstChild("LowerTorso")
+		or character:FindFirstChild("Torso")
+
+	if not lowerTorso then
+		return nil, nil
+	end
+
+	if placement == "WaistLeft" then
+		return lowerTorso, lowerTorso:FindFirstChild("KnifeBelt")
+	elseif placement == "WaistRight" then
+		return lowerTorso, lowerTorso:FindFirstChild("GunBelt")
+	end
+
+	return lowerTorso, nil
+end
+
+local function buildAttachmentCFrame(data)
+	if not data then
+		return CFrame.new()
+	end
+
+	local pos = data.AttachmentPosition or Vector3.zero
+	local orient = data.AttachmentOrientation or Vector3.zero
+
+	return CFrame.new(pos)
+		* CFrame.Angles(
+			math.rad(orient.X),
+			math.rad(orient.Y),
+			math.rad(orient.Z)
+		)
+end
+
+local function getFallbackHipCFrame(placement)
+	-- Used only if this game's character has no GunBelt/KnifeBelt attachment.
+	if placement == "WaistLeft" then
+		return CFrame.new(-0.72, -0.52, 0.18)
+			* CFrame.Angles(
+				math.rad(0),
+				math.rad(90),
+				math.rad(-12)
+			)
+	end
+
+	return CFrame.new(0.72, -0.52, 0.18)
+		* CFrame.Angles(
+			math.rad(0),
+			math.rad(-90),
+			math.rad(12)
+		)
+end
+
+local weaponHideConnections = {}
+
+local REAL_WEAPON_NAME_HINTS = {
+	"knife",
+	"gun",
+	"weapon",
+	"blade",
+	"harvester",
+	"gingerscope",
+	"traveler",
+	"traveller",
+	"sweet",
+	"treat",
+}
+
+local WEAPON_ATTACHMENT_NAMES = {
+	GunBelt = true,
+	KnifeBelt = true,
+	KnifeBack = true,
+}
+
+local BODY_PART_NAMES = {
+	Head = true,
+	HumanoidRootPart = true,
+	UpperTorso = true,
+	LowerTorso = true,
+	Torso = true,
+	LeftUpperArm = true,
+	LeftLowerArm = true,
+	LeftHand = true,
+	RightUpperArm = true,
+	RightLowerArm = true,
+	RightHand = true,
+	LeftUpperLeg = true,
+	LeftLowerLeg = true,
+	LeftFoot = true,
+	RightUpperLeg = true,
+	RightLowerLeg = true,
+	RightFoot = true,
+	["Left Arm"] = true,
+	["Right Arm"] = true,
+	["Left Leg"] = true,
+	["Right Leg"] = true,
+}
+
+local function isInsideScriptedWeapon(instance)
+	local current = instance
+
+	while current do
+		if current.Name == "HolsteredWeapon"
+			or current.Name == "HolsteredGun"
+			or current.Name == "HolsteredKnife"
+			or current.Name == "PersistentGunFallback" then
+
+			return true
+		end
+
+		current = current.Parent
+	end
+
+	return false
+end
+
+local function nameLooksLikeRealWeapon(name)
+	local normalized =
+		string.lower(tostring(name or ""))
+
+	for _, hint in ipairs(REAL_WEAPON_NAME_HINTS) do
+		if string.find(normalized, hint, 1, true) then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function getOriginalWeaponContainerFromAttachment(attachment, character)
+	if not attachment
+		or not attachment:IsA("Attachment")
+		or not WEAPON_ATTACHMENT_NAMES[attachment.Name] then
+
+		return nil
+	end
+
+	local parent = attachment.Parent
+
+	if not parent then
+		return nil
+	end
+
+	-- Ignore the body's own GunBelt / KnifeBelt / KnifeBack attachment.
+	if parent:IsA("BasePart")
+		and parent.Parent == character
+		and BODY_PART_NAMES[parent.Name] then
+
+		return nil
+	end
+
+	local accessory =
+		attachment:FindFirstAncestorOfClass("Accessory")
+
+	if accessory
+		and accessory:IsDescendantOf(character) then
+
+		return accessory
+	end
+
+	local tool =
+		attachment:FindFirstAncestorOfClass("Tool")
+
+	if tool
+		and tool:IsDescendantOf(character) then
+
+		return tool
+	end
+
+	local current = parent
+
+	while current
+		and current.Parent
+		and current.Parent ~= character do
+
+		if current.Parent:IsA("Model")
+			or current.Parent:IsA("Folder") then
+
+			current = current.Parent
+		else
+			break
+		end
+	end
+
+	if current
+		and current.Parent == character
+		and not BODY_PART_NAMES[current.Name] then
+
+		return current
+	end
+
+	return parent
+end
+
+local function getOriginalWeaponContainerByName(obj, character)
+	if not obj
+		or isInsideScriptedWeapon(obj) then
+
+		return nil
+	end
+
+	local tool =
+		obj:IsA("Tool") and obj
+		or obj:FindFirstAncestorOfClass("Tool")
+
+	if tool
+		and tool:IsDescendantOf(character) then
+
+		return tool
+	end
+
+	local accessory =
+		obj:IsA("Accessory") and obj
+		or obj:FindFirstAncestorOfClass("Accessory")
+
+	if accessory
+		and accessory:IsDescendantOf(character)
+		and nameLooksLikeRealWeapon(accessory.Name) then
+
+		return accessory
+	end
+
+	local current = obj
+
+	while current
+		and current ~= character do
+
+		if nameLooksLikeRealWeapon(current.Name)
+			and not BODY_PART_NAMES[current.Name] then
+
+			return current
+		end
+
+		current = current.Parent
+	end
+
+	return nil
+end
+
+local MM2_WEAPON_MESH_IDS = {
+	["19040337"] = true,
+	["95356090"] = true,
+	["103838505"] = true,
+	["117500241"] = true,
+	["156092238"] = true,
+	["179155055"] = true,
+	["283709822"] = true,
+	["305826272"] = true,
+	["3132923779"] = true,
+	["3183449780"] = true,
+	["4217523241"] = true,
+	["4535643726"] = true,
+	["4730813852"] = true,
+	["6085025295"] = true,
+	["6123168377"] = true,
+	["6124173614"] = true,
+	["6125828567"] = true,
+	["6404140078"] = true,
+	["7775027413"] = true,
+	["7791364860"] = true,
+	["8310911339"] = true,
+	["9702732853"] = true,
+	["9702755186"] = true,
+	["11158364935"] = true,
+	["11182796403"] = true,
+	["11866444071"] = true,
+	["11868991644"] = true,
+	["12921240966"] = true,
+	["13916938702"] = true,
+	["15320557481"] = true,
+	["15395668244"] = true,
+	["15408280573"] = true,
+	["15408863676"] = true,
+	["16895099893"] = true,
+	["77235373292363"] = true,
+	["77738838473091"] = true,
+	["86944837615327"] = true,
+	["99836890880541"] = true,
+	["107813118898769"] = true,
+	["109711282082830"] = true,
+	["109742397574153"] = true,
+	["112444333460928"] = true,
+	["115447220952926"] = true,
+	["126591885289479"] = true,
+}
+
+local function getAssetNumber(value)
+	if not value then
+		return nil
+	end
+
+	return tostring(value):match("(%d+)")
+end
+
+local function isKnownMM2WeaponMesh(obj)
+	if isInsideScriptedWeapon(obj) then
+		return false
+	end
+
+	if obj:IsA("MeshPart") then
+		local id = getAssetNumber(obj.MeshId)
+		return id and MM2_WEAPON_MESH_IDS[id] == true
+	end
+
+	if obj:IsA("SpecialMesh") then
+		local id = getAssetNumber(obj.MeshId)
+		return id and MM2_WEAPON_MESH_IDS[id] == true
+	end
+
+	return false
+end
+
+local function makeOriginalWeaponInvisible(container)
+	if not container
+		or not container.Parent
+		or isInsideScriptedWeapon(container) then
+
+		return
+	end
+
+	local function hideObject(obj)
+		if obj:IsA("BasePart") then
+			-- Keep the real weapon attached so its welds don't break/freeze,
+			-- but hide it locally.
+			obj.LocalTransparencyModifier = 1
+			obj.CanCollide = false
+			obj.CanTouch = false
+			obj.CanQuery = false
+
+		elseif obj:IsA("Decal")
+			or obj:IsA("Texture") then
+
+			obj.Transparency = 1
+
+		elseif obj:IsA("Trail")
+			or obj:IsA("Beam")
+			or obj:IsA("ParticleEmitter")
+			or obj:IsA("Smoke")
+			or obj:IsA("Fire")
+			or obj:IsA("Sparkles") then
+
+			obj.Enabled = false
+		end
+	end
+
+	hideObject(container)
+
+	for _, descendant in ipairs(container:GetDescendants()) do
+		if not isInsideScriptedWeapon(descendant) then
+			hideObject(descendant)
+		end
+	end
+end
+
+local SAFE_AVATAR_ATTACHMENT_NAMES = {
+	HairAttachment = true,
+	HatAttachment = true,
+	FaceFrontAttachment = true,
+	FaceCenterAttachment = true,
+	NeckAttachment = true,
+	BodyFrontAttachment = true,
+	BodyBackAttachment = true,
+	LeftCollarAttachment = true,
+	RightCollarAttachment = true,
+	LeftShoulderAttachment = true,
+	RightShoulderAttachment = true,
+}
+
+local ORIGINAL_WEAPON_RENDER_BIND =
+	"BotControllerOriginalWeaponMask"
+
+local function getAccessoryAncestor(instance)
+	if not instance then
+		return nil
+	end
+
+	return instance:FindFirstAncestorOfClass("Accessory")
+end
+
+local function accessoryHasAttachment(accessory, lookup)
+	if not accessory then
+		return false
+	end
+
+	for _, obj in ipairs(accessory:GetDescendants()) do
+		if obj:IsA("Attachment")
+			and lookup[obj.Name] then
+
+			return true
+		end
+	end
+
+	return false
+end
+
+local function isSafeAvatarAccessory(instance)
+	local accessory =
+		instance:IsA("Accessory") and instance
+		or getAccessoryAncestor(instance)
+
+	if not accessory then
+		return false
+	end
+
+	-- Preserve normal avatar hair / hat / face / body accessories.
+	if accessoryHasAttachment(
+		accessory,
+		SAFE_AVATAR_ATTACHMENT_NAMES
+	) then
+		return true
+	end
+
+	return false
+end
+
+local function restoreSafeAvatarAccessoryVisuals(character)
+	if not character then
+		return
+	end
+
+	for _, obj in ipairs(character:GetDescendants()) do
+		if obj:IsA("BasePart")
+			and isSafeAvatarAccessory(obj)
+			and not isInsideScriptedWeapon(obj) then
+
+			-- This specifically undoes the old aggressive script if it is
+			-- still running in the same executor session.
+			obj.LocalTransparencyModifier = 0
+		end
+	end
+end
+
+local function hideOriginalWeaponPart(part)
+	if not part
+		or not part.Parent
+		or not part:IsA("BasePart")
+		or isInsideScriptedWeapon(part) then
+
+		return
+	end
+
+	part.LocalTransparencyModifier = 1
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+
+	for _, obj in ipairs(part:GetDescendants()) do
+		if obj:IsA("Decal")
+			or obj:IsA("Texture") then
+
+			obj.Transparency = 1
+
+		elseif obj:IsA("Trail")
+			or obj:IsA("Beam")
+			or obj:IsA("ParticleEmitter")
+			or obj:IsA("Smoke")
+			or obj:IsA("Fire")
+			or obj:IsA("Sparkles") then
+
+			obj.Enabled = false
+		end
+	end
+end
+
+local function isOriginalWeaponPart(part, character)
+	if not part
+		or not part:IsA("BasePart")
+		or not character
+		or isInsideScriptedWeapon(part)
+		or isCharacterBodyPart(part, character)
+		or isSafeAvatarAccessory(part) then
+
+		return false
+	end
+
+	-- Anything inside an equipped Tool is definitely an original weapon.
+	local tool =
+		part:FindFirstAncestorOfClass("Tool")
+
+	if tool
+		and tool:IsDescendantOf(character) then
+
+		return true
+	end
+
+	-- Accessories using the game's weapon belt/back attachments are weapons.
+	local accessory =
+		getAccessoryAncestor(part)
+
+	if accessory
+		and accessory:IsDescendantOf(character)
+		and accessoryHasAttachment(
+			accessory,
+			WEAPON_ATTACHMENT_NAMES
+		) then
+
+		return true
+	end
+
+	-- Custom MM2 display models are commonly parented directly under
+	-- Character without being Tools/Accessories.
+	if part:IsDescendantOf(character) then
+		local top = part
+
+		while top.Parent
+			and top.Parent ~= character do
+
+			top = top.Parent
+		end
+
+		if top.Parent == character
+			and not BODY_PART_NAMES[top.Name]
+			and not top:IsA("Accessory") then
+
+			return true
+		end
+	end
+
+	return false
+end
+
+local function hideCharacterOriginalWeaponParts(character)
+	if not character then
+		return
+	end
+
+	for _, obj in ipairs(character:GetDescendants()) do
+		if obj:IsA("BasePart")
+			and isOriginalWeaponPart(
+				obj,
+				character
+			) then
+
+			hideOriginalWeaponPart(obj)
+		end
+	end
+end
+
+local function hideConnectedOriginalWeaponParts(character)
+	if not character then
+		return
+	end
+
+	-- Check all physical parts connected to the actual avatar body.
+	-- This catches custom displays even if MM2 parents the weapon elsewhere.
+	for _, bodyPart in ipairs(character:GetChildren()) do
+		if bodyPart:IsA("BasePart")
+			and BODY_PART_NAMES[bodyPart.Name] then
+
+			local ok, connected =
+				pcall(function()
+					return bodyPart:GetConnectedParts(true)
+				end)
+
+			if ok and connected then
+				for _, part in ipairs(connected) do
+					if part
+						and part:IsA("BasePart")
+						and not isInsideScriptedWeapon(part)
+						and not isCharacterBodyPart(part, character)
+						and not isSafeAvatarAccessory(part) then
+
+						hideOriginalWeaponPart(part)
+					end
+				end
+			end
+		end
+	end
+end
+
+local function removeOriginalWeaponDisplays(character)
+	if not character then
+		return
+	end
+
+	-- First restore legitimate avatar cosmetics in case an older version of
+	-- this script is still trying to hide them.
+	restoreSafeAvatarAccessoryVisuals(character)
+
+	-- Hide only non-body weapon/display geometry.
+	hideCharacterOriginalWeaponParts(character)
+	hideConnectedOriginalWeaponParts(character)
+end
+
+local function stopRealWeaponHideLoop(character)
+	local connection =
+		weaponHideConnections[character]
+
+	if connection then
+		connection:Disconnect()
+		weaponHideConnections[character] = nil
+	end
+
+	pcall(function()
+		RunService:UnbindFromRenderStep(
+			ORIGINAL_WEAPON_RENDER_BIND
+		)
+	end)
+end
+
+local function startRealWeaponHideLoop(character)
+	if not character then
+		return
+	end
+
+	stopRealWeaponHideLoop(character)
+
+	removeOriginalWeaponDisplays(character)
+
+	-- Refresh detection in case MM2 recreates its weapon display.
+	local nextScan = 0
+
+	weaponHideConnections[character] =
+		RunService.Heartbeat:Connect(function()
+			if not character.Parent
+				or not character:FindFirstChild("HolsteredWeapon") then
+
+				stopRealWeaponHideLoop(character)
+				return
+			end
+
+			if time() >= nextScan then
+				nextScan = time() + 0.20
+				removeOriginalWeaponDisplays(character)
+			end
+		end)
+
+	-- Final visual pass every rendered frame.
+	pcall(function()
+		RunService:UnbindFromRenderStep(
+			ORIGINAL_WEAPON_RENDER_BIND
+		)
+	end)
+
+	RunService:BindToRenderStep(
+		ORIGINAL_WEAPON_RENDER_BIND,
+		10000,
+		function()
+			if not character.Parent
+				or not character:FindFirstChild("HolsteredWeapon") then
+
+				return
+			end
+
+			-- Restore legitimate avatar accessories first.
+			restoreSafeAvatarAccessoryVisuals(character)
+
+			-- Then hide only detected original weapon parts.
+			hideCharacterOriginalWeaponParts(character)
+			hideConnectedOriginalWeaponParts(character)
+		end
+	)
+end
+
+local function unequipRealHeldTools(character)
+	if not character then
+		return
+	end
+
+	local humanoid =
+		character:FindFirstChildOfClass("Humanoid")
+
+	if humanoid then
+		pcall(function()
+			humanoid:UnequipTools()
+		end)
+	end
+end
+
+local function findBodyPlacementAttachment(character, placement)
+	if not character then
+		return nil
+	end
+
+	local wantedName
+
+	if placement == "WaistRight" then
+		wantedName = "GunBelt"
+	elseif placement == "WaistLeft" then
+		wantedName = "KnifeBelt"
+	elseif placement == "Back" then
+		wantedName = "KnifeBack"
+	end
+
+	if not wantedName then
+		return nil
+	end
+
+	-- Recursive lookup supports custom rigs where the attachment is
+	-- not directly under LowerTorso.
+	local attachment =
+		character:FindFirstChild(wantedName, true)
+
+	if attachment
+		and attachment:IsA("Attachment")
+		and attachment.Parent
+		and attachment.Parent:IsA("BasePart") then
+
+		return attachment
+	end
+
+	return nil
+end
+
+local function getFallbackBodyAnchor(character)
+	return character:FindFirstChild("LowerTorso")
+		or character:FindFirstChild("Torso")
+		or character:FindFirstChild("UpperTorso")
+		or character:FindFirstChild("HumanoidRootPart")
+end
+
+local function getFallbackBeltWorldCFrame(anchor, placement)
+	if not anchor then
+		return nil
+	end
+
+	if placement == "WaistLeft" then
+		return anchor.CFrame
+			* CFrame.new(-0.62, -0.45, 0.16)
+	end
+
+	if placement == "Back" then
+		return anchor.CFrame
+			* CFrame.new(0, 0, 0.48)
+	end
+
+	return anchor.CFrame
+		* CFrame.new(0.62, -0.45, 0.16)
+end
+
+WeaponPackRuntime.syncBotWeaponAttachments =
+	function(botCharacter)
+		if not botCharacter
+			or botCharacter == player.Character then
+
+			return
+		end
+
+		local playerCharacter =
+			player.Character
+
+		if not playerCharacter then
+			return
+		end
+
+		local attachmentMap = {
+			{
+				name = "GunBelt",
+				playerPart =
+					playerCharacter:FindFirstChild(
+						"LowerTorso"
+					)
+					or playerCharacter:FindFirstChild(
+						"Torso"
+					),
+				botPart =
+					botCharacter:FindFirstChild(
+						"LowerTorso"
+					)
+					or botCharacter:FindFirstChild(
+						"Torso"
+					),
+			},
+
+			{
+				name = "KnifeBelt",
+				playerPart =
+					playerCharacter:FindFirstChild(
+						"LowerTorso"
+					)
+					or playerCharacter:FindFirstChild(
+						"Torso"
+					),
+				botPart =
+					botCharacter:FindFirstChild(
+						"LowerTorso"
+					)
+					or botCharacter:FindFirstChild(
+						"Torso"
+					),
+			},
+
+			{
+				name = "KnifeBack",
+				playerPart =
+					playerCharacter:FindFirstChild(
+						"UpperTorso"
+					)
+					or playerCharacter:FindFirstChild(
+						"Torso"
+					),
+				botPart =
+					botCharacter:FindFirstChild(
+						"UpperTorso"
+					)
+					or botCharacter:FindFirstChild(
+						"Torso"
+					),
+			},
+		}
+
+		for _, info in ipairs(
+			attachmentMap
+		) do
+			local source =
+				info.playerPart
+				and info.playerPart:FindFirstChild(
+					info.name
+				)
+
+			if source
+				and source:IsA("Attachment")
+				and info.botPart then
+
+				local target =
+					info.botPart:FindFirstChild(
+						info.name
+					)
+
+				if not target
+					or not target:IsA("Attachment") then
+
+					if target then
+						target:Destroy()
+					end
+
+					target =
+						Instance.new(
+							"Attachment"
+						)
+
+					target.Name =
+						info.name
+
+					target.Parent =
+						info.botPart
+				end
+
+				-- CFrame contains the exact local position + rotation
+				-- used by MM2 on the player's real rig.
+				target.CFrame =
+					source.CFrame
+
+				-- Keep the attachment vector properties identical too.
+				target.Axis =
+					source.Axis
+
+				target.SecondaryAxis =
+					source.SecondaryAxis
+			end
+		end
+	end
+
+local function holsterWeapon(character, weaponName, slotModelName)
+	if not character then
+		return false, "character missing"
+	end
+
+	-- Bots are normal Roblox avatar rigs and do not naturally contain
+	-- MM2's GunBelt / KnifeBelt / KnifeBack attachments.
+	-- Copy the exact attachment transforms from the player's MM2 rig.
+	if character ~= player.Character then
+		WeaponPackRuntime.syncBotWeaponAttachments(
+			character
+		)
+	end
+
+	local exactVisual =
+		FALLBACK_WEAPON_VISUALS[weaponName]
+
+	local weaponType =
+		WeaponPackRuntime.WEAPON_TYPE_HINTS[weaponName]
+		or (exactVisual and exactVisual.Type)
+		or "Knife"
+
+	local holsterModelName =
+		slotModelName
+		or (
+			character ~= player.Character
+			and (
+				weaponType == "Gun"
+				and "HolsteredGun"
+				or "HolsteredKnife"
+			)
+			or "HolsteredWeapon"
+		)
+
+	local data =
+		WEAPON_HOLSTER_DATA[weaponName]
+		or exactVisual
+		or {
+			Placement = weaponType == "Gun" and "WaistRight" or "WaistLeft",
+			AttachmentPosition = Vector3.zero,
+			AttachmentOrientation = Vector3.zero,
+		}
+
+	local source =
+		cloneWeaponAsTool(weaponName)
+
+	if not source then
+		return false, "weapon visual not found"
+	end
+
+	local model =
+		prepareWeaponVisual(
+			source,
+			weaponName,
+			holsterModelName
+		)
+
+	if not model
+		or not model.PrimaryPart then
+
+		return false, "weapon has no visual part"
+	end
+
+	local bodyAttachment =
+		findBodyPlacementAttachment(
+			character,
+			data.Placement
+		)
+
+	local fallbackAnchor =
+		getFallbackBodyAnchor(character)
+
+	if not bodyAttachment
+		and not fallbackAnchor then
+
+		model:Destroy()
+		return false, "body anchor missing"
+	end
+
+	clearHolsteredWeapon(character, holsterModelName)
+
+	-- Only the real player has MM2's original weapon display/Tools.
+	-- Bot models do not need this cleanup.
+	if character == player.Character then
+		unequipRealHeldTools(
+			character
+		)
+	end
+
+	model.Parent = character
+
+	local root =
+		model.PrimaryPart
+
+	-- These values describe the attachment ON THE WEAPON.
+	-- To make that attachment coincide with GunBelt/KnifeBelt,
+	-- the weapon attachment transform must be INVERTED.
+	local weaponAttachmentCFrame =
+		buildAttachmentCFrame(data)
+
+	local targetWorldCFrame
+
+	if bodyAttachment then
+		targetWorldCFrame =
+			bodyAttachment.WorldCFrame
+	else
+		targetWorldCFrame =
+			getFallbackBeltWorldCFrame(
+				fallbackAnchor,
+				data.Placement
+			)
+	end
+
+	local finalWorldCFrame =
+		targetWorldCFrame
+		* weaponAttachmentCFrame:Inverse()
+
+	-- Match the PLAYER long-gun orientation exactly.
+	-- No bot-only position offset.
+	if weaponName == "Harvester"
+		or weaponName == "Icepiercer" then
+
+		finalWorldCFrame =
+			finalWorldCFrame
+			* CFrame.Angles(
+				math.rad(90),
+				0,
+				0
+			)
+	end
+
+	root.CFrame =
+		finalWorldCFrame
+
+	-- Weld to whichever body part owns the placement attachment.
+	local weldPart =
+		bodyAttachment
+		and bodyAttachment.Parent
+		or fallbackAnchor
+
+	local weld = Instance.new("WeldConstraint")
+	weld.Name = "HolsterWeld"
+	weld.Part0 = weldPart
+	weld.Part1 = root
+	weld.Parent = root
+
+	-- Only the actual player has an original MM2 weapon display
+	-- that needs masking. Bots use only our cosmetic weapon.
+	if character == player.Character then
+		startRealWeaponHideLoop(
+			character
+		)
+	end
+
+	return true
+end
+
+
+--------------------------------------------------
+-- PLAYER WEAPON: REPLACE CURRENT WEAPON MESH ONLY
+--
+-- IMPORTANT:
+-- Only edits an existing SpecialMesh.
+-- It NEVER changes MeshPart.MeshId because that can make the
+-- replacement mesh enormous due to MeshPart.Size.
+--------------------------------------------------
+
+local function getWeaponVisualData(
+	weaponName,
+	allowDeepSearch
+)
+	local exact =
+		FALLBACK_WEAPON_VISUALS[
+			weaponName
+		]
+
+	if not exact then
+		return nil
+	end
+
+	return {
+		MeshId = exact.MeshId,
+		TextureId = exact.TextureId,
+		Scale = exact.Scale,
+		Offset =
+			exact.Offset
+			or Vector3.zero,
+		Type =
+			exact.Type
+			or WeaponPackRuntime.WEAPON_TYPE_HINTS[
+				weaponName
+			]
+			or "Knife",
+		Placement =
+			exact.Placement,
+		AttachmentPosition =
+			exact.AttachmentPosition,
+		AttachmentOrientation =
+			exact.AttachmentOrientation,
+		Color = exact.Color,
+		Material = exact.Material,
+		Transparency =
+			exact.Transparency,
+		Reflectance =
+			exact.Reflectance,
+		VertexColor =
+			exact.VertexColor,
+		Source = "verified exact",
+	}
+end
+
+local PLAYER_BODY_NAMES = {
+	Head = true,
+	HumanoidRootPart = true,
+	UpperTorso = true,
+	LowerTorso = true,
+	Torso = true,
+
+	LeftUpperArm = true,
+	LeftLowerArm = true,
+	LeftHand = true,
+	RightUpperArm = true,
+	RightLowerArm = true,
+	RightHand = true,
+
+	LeftUpperLeg = true,
+	LeftLowerLeg = true,
+	LeftFoot = true,
+	RightUpperLeg = true,
+	RightLowerLeg = true,
+	RightFoot = true,
+
+	["Left Arm"] = true,
+	["Right Arm"] = true,
+	["Left Leg"] = true,
+	["Right Leg"] = true,
+}
+
+local SAFE_AVATAR_ATTACHMENTS_FOR_SWAP = {
+	HairAttachment = true,
+	HatAttachment = true,
+	FaceFrontAttachment = true,
+	FaceCenterAttachment = true,
+	NeckAttachment = true,
+	BodyFrontAttachment = true,
+	BodyBackAttachment = true,
+	LeftCollarAttachment = true,
+	RightCollarAttachment = true,
+	LeftShoulderAttachment = true,
+	RightShoulderAttachment = true,
+}
+
+local function isPlayerBodyPart(part, character)
+	return part
+		and part:IsA("BasePart")
+		and part.Parent == character
+		and PLAYER_BODY_NAMES[part.Name] == true
+end
+
+local function isNormalAvatarAccessoryForSwap(part)
+	local accessory =
+		part
+		and part:FindFirstAncestorOfClass("Accessory")
+
+	if not accessory then
+		return false
+	end
+
+	for _, obj in ipairs(accessory:GetDescendants()) do
+		if obj:IsA("Attachment")
+			and SAFE_AVATAR_ATTACHMENTS_FOR_SWAP[obj.Name] then
+
+			return true
+		end
+	end
+
+	return false
+end
+
+local function getPartSpecialMesh(part)
+	if not part
+		or not part:IsA("BasePart") then
+
+		return nil
+	end
+
+	return part:FindFirstChildWhichIsA("SpecialMesh")
+end
+
+local function connectedToCharacterBody(part, character)
+	if not part
+		or not character then
+
+		return false
+	end
+
+	if part:IsDescendantOf(character) then
+		return true
+	end
+
+	local ok, connected =
+		pcall(function()
+			return part:GetConnectedParts(true)
+		end)
+
+	if ok and connected then
+		for _, other in ipairs(connected) do
+			if isPlayerBodyPart(other, character) then
+				return true
+			end
+		end
+	end
+
+	return false
+end
+
+WeaponPackRuntime.findPlacementWeaponPart =
+	function(character, weaponType)
+		if not character then
+			return nil, nil
+		end
+
+		local wantedAttachments
+
+		if weaponType == "Gun" then
+			wantedAttachments = {
+				GunBelt = true,
+			}
+		else
+			wantedAttachments = {
+				KnifeBelt = true,
+				KnifeBack = true,
+			}
+		end
+
+		for _, attachment in ipairs(
+			character:GetDescendants()
+		) do
+			if attachment:IsA("Attachment")
+				and wantedAttachments[
+					attachment.Name
+				] then
+
+				local parent =
+					attachment.Parent
+
+				-- Skip MM2's BODY attachment itself.
+				if parent
+					and parent:IsA("BasePart")
+					and parent.Parent == character
+					and PLAYER_BODY_NAMES[
+						parent.Name
+					] then
+
+					continue
+				end
+
+				local part = nil
+
+				if parent
+					and parent:IsA("BasePart") then
+
+					part = parent
+				end
+
+				if not part then
+					local accessory =
+						attachment:FindFirstAncestorOfClass(
+							"Accessory"
+						)
+
+					if accessory then
+						part =
+							accessory:FindFirstChild(
+								"Handle"
+							)
+							or accessory:FindFirstChildWhichIsA(
+								"BasePart",
+								true
+							)
+					end
+				end
+
+				if not part then
+					local tool =
+						attachment:FindFirstAncestorOfClass(
+							"Tool"
+						)
+
+					if tool then
+						part =
+							tool:FindFirstChild(
+								"Handle"
+							)
+							or tool:FindFirstChildWhichIsA(
+								"BasePart",
+								true
+							)
+					end
+				end
+
+				if not part then
+					local current =
+						attachment.Parent
+
+					while current
+						and current ~= character do
+
+						if current:IsA("Model") then
+							part =
+								current:FindFirstChild(
+									"Handle",
+									true
+								)
+								or current:FindFirstChildWhichIsA(
+									"BasePart",
+									true
+								)
+
+							if part then
+								break
+							end
+						end
+
+						current =
+							current.Parent
+					end
+				end
+
+				if part
+					and not isPlayerBodyPart(
+						part,
+						character
+					)
+					and not isNormalAvatarAccessoryForSwap(
+						part
+					)
+					and not part:FindFirstAncestor(
+						"HolsteredWeapon"
+					)
+					and not part:FindFirstAncestor(
+						"HolsteredGun"
+					)
+					and not part:FindFirstAncestor(
+						"HolsteredKnife"
+					)
+					and not part:FindFirstAncestor(
+						"PersistentGunFallback"
+					) then
+
+					local mesh =
+						getPartSpecialMesh(
+							part
+						)
+
+					if mesh then
+						return part, mesh
+					end
+				end
+			end
+		end
+
+		return nil, nil
+	end
+
+WeaponPackRuntime.partHasWeaponPlacementAttachment =
+	function(part, weaponType)
+		if not part then
+			return false
+		end
+
+		local wanted =
+			weaponType == "Gun"
+			and "GunBelt"
+			or nil
+
+		if wanted then
+			for _, object in ipairs(
+				part:GetDescendants()
+			) do
+				if object:IsA("Attachment")
+					and object.Name == wanted then
+
+					return true
+				end
+			end
+		else
+			for _, object in ipairs(
+				part:GetDescendants()
+			) do
+				if object:IsA("Attachment")
+					and (
+						object.Name == "KnifeBelt"
+						or object.Name == "KnifeBack"
+					) then
+
+					return true
+				end
+			end
+		end
+
+		return false
+	end
+
+local function getCurrentWeaponSpecialMeshCandidates(character, weaponType)
+	local candidates = {}
+
+	if not character then
+		return candidates
+	end
+
+	--------------------------------------------------
+	-- 0. EXACT MM2 PLACEMENT ATTACHMENT
+	-- Highest priority and especially important when MM2
+	-- recreates the gun after a round ends.
+	--------------------------------------------------
+
+	local placementPart,
+		placementMesh =
+			WeaponPackRuntime.findPlacementWeaponPart(
+				character,
+				weaponType
+			)
+
+	if placementPart
+		and placementMesh then
+
+		table.insert(
+			candidates,
+			{
+				part = placementPart,
+				mesh = placementMesh,
+				score = 10000,
+				exactPlacement = true,
+			}
+		)
+	end
+
+	local torso =
+		character:FindFirstChild("LowerTorso")
+		or character:FindFirstChild("Torso")
+		or character:FindFirstChild("UpperTorso")
+		or character:FindFirstChild("HumanoidRootPart")
+
+	--------------------------------------------------
+	-- 1. EQUIPPED TOOL HANDLE
+	--------------------------------------------------
+
+	for _, child in ipairs(character:GetChildren()) do
+		if child:IsA("Tool") then
+			local handle =
+				child:FindFirstChild("Handle")
+				or child:FindFirstChildWhichIsA("BasePart", true)
+
+			local mesh =
+				getPartSpecialMesh(handle)
+
+			if handle and mesh then
+				local lowerToolName =
+					string.lower(
+						tostring(child.Name)
+					)
+
+				local lowerHandleName =
+					string.lower(
+						tostring(handle.Name)
+					)
+
+				local toolLooksGun =
+					string.find(
+						lowerToolName,
+						"gun",
+						1,
+						true
+					)
+					or string.find(
+						lowerToolName,
+						"revolver",
+						1,
+						true
+					)
+					or string.find(
+						lowerHandleName,
+						"gun",
+						1,
+						true
+					)
+
+				local toolLooksKnife =
+					string.find(
+						lowerToolName,
+						"knife",
+						1,
+						true
+					)
+					or string.find(
+						lowerToolName,
+						"blade",
+						1,
+						true
+					)
+
+				local plausibleTool =
+					weaponType == "Gun"
+					and not toolLooksKnife
+					or weaponType ~= "Gun"
+					and not toolLooksGun
+
+				if plausibleTool then
+					table.insert(
+						candidates,
+						{
+							part = handle,
+							mesh = mesh,
+							score =
+								toolLooksGun
+								and 2600
+								or 2000,
+						}
+					)
+				end
+			end
+		end
+	end
+
+	--------------------------------------------------
+	-- 2. CHARACTER-PARENTED DISPLAY PARTS
+	--------------------------------------------------
+
+	for _, part in ipairs(character:GetDescendants()) do
+		if part:IsA("BasePart")
+			and not isPlayerBodyPart(part, character)
+			and not isNormalAvatarAccessoryForSwap(part)
+			and not isInsideScriptedWeapon(part) then
+
+			local mesh =
+				getPartSpecialMesh(part)
+
+			if mesh
+				and part ~= placementPart then
+
+				local score = 0
+				local lowerName =
+					string.lower(
+						tostring(part.Name)
+					)
+
+				local parentName =
+					string.lower(
+						tostring(
+							part.Parent
+							and part.Parent.Name
+							or ""
+						)
+					)
+
+				if string.find(lowerName, "gun", 1, true)
+					or string.find(parentName, "gun", 1, true)
+					or string.find(lowerName, "revolver", 1, true)
+					or string.find(parentName, "revolver", 1, true) then
+
+					score += 500
+				end
+
+				if string.find(lowerName, "knife", 1, true)
+					or string.find(parentName, "knife", 1, true)
+					or string.find(lowerName, "blade", 1, true)
+					or string.find(parentName, "blade", 1, true) then
+
+					score += 350
+				end
+
+				if lowerName == "handle" then
+					score += 100
+				end
+
+				if torso then
+					local localPos =
+						torso.CFrame:PointToObjectSpace(
+							part.Position
+						)
+
+					local distance =
+						Vector3.new(
+							localPos.X,
+							localPos.Y,
+							localPos.Z
+						).Magnitude
+
+					score +=
+						math.max(
+							0,
+							250 - distance * 40
+						)
+
+					-- Harvester is a gun, so strongly prefer the
+					-- right side where MM2 normally displays guns.
+					if weaponType == "Gun" then
+						if localPos.X > 0 then
+							score += 450
+						else
+							score -= 300
+						end
+					else
+						if localPos.X < 0 then
+							score += 450
+						else
+							score -= 300
+						end
+					end
+				end
+
+				-- Never use the visible knife as a fallback host for
+				-- a missing gun (or vice versa) after round transitions.
+				local placementMatch =
+					WeaponPackRuntime.partHasWeaponPlacementAttachment(
+						part,
+						weaponType
+					)
+
+				local plausible = true
+
+				if torso
+					and not placementMatch then
+
+					local localPos =
+						torso.CFrame:PointToObjectSpace(
+							part.Position
+						)
+
+					local lowerName =
+						string.lower(
+							tostring(
+								part.Name
+							)
+						)
+
+					local parentName =
+						string.lower(
+							tostring(
+								part.Parent
+								and part.Parent.Name
+								or ""
+							)
+						)
+
+					if weaponType == "Gun" then
+						local looksGun =
+							string.find(
+								lowerName,
+								"gun",
+								1,
+								true
+							)
+							or string.find(
+								parentName,
+								"gun",
+								1,
+								true
+							)
+							or string.find(
+								lowerName,
+								"revolver",
+								1,
+								true
+							)
+							or string.find(
+								parentName,
+								"revolver",
+								1,
+								true
+							)
+
+						if localPos.X <= 0
+							and not looksGun then
+
+							plausible = false
+						end
+					else
+						local looksKnife =
+							string.find(
+								lowerName,
+								"knife",
+								1,
+								true
+							)
+							or string.find(
+								parentName,
+								"knife",
+								1,
+								true
+							)
+							or string.find(
+								lowerName,
+								"blade",
+								1,
+								true
+							)
+							or string.find(
+								parentName,
+								"blade",
+								1,
+								true
+							)
+
+						if localPos.X >= 0
+							and not looksKnife then
+
+							plausible = false
+						end
+					end
+				end
+
+				if plausible then
+					table.insert(
+						candidates,
+						{
+							part = part,
+							mesh = mesh,
+							score = score,
+						}
+					)
+				end
+			end
+		end
+	end
+
+	--------------------------------------------------
+	-- 3. WORKSPACE-PARENTED BUT PHYSICALLY CONNECTED DISPLAY
+	--------------------------------------------------
+
+	if torso then
+		for _, part in ipairs(workspace:GetDescendants()) do
+			if part:IsA("BasePart")
+				and not part:IsDescendantOf(character)
+				and not isInsideScriptedWeapon(part)
+				and not isNormalAvatarAccessoryForSwap(part) then
+
+				local mesh =
+					getPartSpecialMesh(part)
+
+				if mesh
+					and (part.Position - torso.Position).Magnitude <= 8
+					and connectedToCharacterBody(part, character) then
+
+					local localPos =
+						torso.CFrame:PointToObjectSpace(
+							part.Position
+						)
+
+					local score = 600
+
+					if weaponType == "Gun" then
+						if localPos.X > 0 then
+							score += 500
+						else
+							score -= 300
+						end
+					else
+						if localPos.X < 0 then
+							score += 500
+						else
+							score -= 300
+						end
+					end
+
+					table.insert(
+						candidates,
+						{
+							part = part,
+							mesh = mesh,
+							score = score,
+						}
+					)
+				end
+			end
+		end
+	end
+
+	table.sort(
+		candidates,
+		function(a, b)
+			return a.score > b.score
+		end
+	)
+
+	return candidates
+end
+
+local ORIGINAL_WEAPON_MESH_STATE = {}
+
+local function isOrientationBodyPart(part, character)
+	return part
+		and part:IsA("BasePart")
+		and part.Parent == character
+		and PLAYER_BODY_NAMES[part.Name] == true
+end
+
+local function findWeaponBodyJoint(part, character)
+	if not part
+		or not character then
+
+		return nil
+	end
+
+	-- Find the joint that directly connects THIS weapon part
+	-- to the avatar body. We do not touch internal weapon welds.
+	for _, obj in ipairs(character:GetDescendants()) do
+		if obj:IsA("Weld")
+			or obj:IsA("Motor6D") then
+
+			if obj.Part0 == part
+				and isOrientationBodyPart(
+					obj.Part1,
+					character
+				) then
+
+				return obj
+
+			elseif obj.Part1 == part
+				and isOrientationBodyPart(
+					obj.Part0,
+					character
+				) then
+
+				return obj
+			end
+		end
+	end
+
+	-- Some games parent the weapon joint under the weapon model.
+	local parent =
+		part.Parent
+
+	if parent then
+		for _, obj in ipairs(parent:GetDescendants()) do
+			if obj:IsA("Weld")
+				or obj:IsA("Motor6D") then
+
+				if obj.Part0 == part
+					and isOrientationBodyPart(
+						obj.Part1,
+						character
+					) then
+
+					return obj
+
+				elseif obj.Part1 == part
+					and isOrientationBodyPart(
+						obj.Part0,
+						character
+					) then
+
+					return obj
+				end
+			end
+		end
+	end
+
+	return nil
+end
+
+local function saveOriginalWeaponMeshState(part, mesh, character)
+	if not part
+		or not mesh then
+		return
+	end
+
+	local state =
+		ORIGINAL_WEAPON_MESH_STATE[part]
+
+	if not state then
+		state = {
+			MeshId = mesh.MeshId,
+			TextureId = mesh.TextureId,
+			Scale = mesh.Scale,
+			Offset = mesh.Offset,
+			MeshType = mesh.MeshType,
+			VertexColor = mesh.VertexColor,
+
+			Color = part.Color,
+			Material = part.Material,
+			Transparency = part.Transparency,
+			Reflectance = part.Reflectance,
+		}
+
+		ORIGINAL_WEAPON_MESH_STATE[part] =
+			state
+	end
+
+	-- Save the original body joint only once.
+	if not state.Joint then
+		local joint =
+			findWeaponBodyJoint(
+				part,
+				character
+			)
+
+		if joint then
+			state.Joint = joint
+			state.JointC0 = joint.C0
+			state.JointC1 = joint.C1
+		end
+	end
+end
+
+local function restoreOriginalWeaponMeshes()
+	local restored = 0
+
+	for part, state in pairs(
+		ORIGINAL_WEAPON_MESH_STATE
+	) do
+
+		if part
+			and part.Parent then
+
+			local mesh =
+				part:FindFirstChildWhichIsA(
+					"SpecialMesh"
+				)
+
+			if mesh then
+				pcall(function()
+					mesh.MeshType =
+						state.MeshType
+
+					mesh.MeshId =
+						state.MeshId
+
+					mesh.TextureId =
+						state.TextureId
+
+					mesh.Scale =
+						state.Scale
+
+					mesh.Offset =
+						state.Offset
+
+					mesh.VertexColor =
+						state.VertexColor
+						or Vector3.new(1, 1, 1)
+
+					part.Color =
+						state.Color
+						or part.Color
+
+					part.Material =
+						state.Material
+						or part.Material
+
+					part.Transparency =
+						state.Transparency
+						or 0
+
+					part.Reflectance =
+						state.Reflectance
+						or 0
+
+					part.LocalTransparencyModifier = 0
+
+					part:SetAttribute(
+						"BotControllerWeaponReplacement",
+						nil
+					)
+
+					part:SetAttribute(
+						"BotControllerHarvesterSidewaysFixed",
+						nil
+					)
+
+					part:SetAttribute(
+						"BotControllerIcepiercerSidewaysFixed",
+						nil
+					)
+
+					part:SetAttribute(
+						"BotControllerCelestialBackFixed",
+						nil
+					)
+
+					restored += 1
+				end)
+			end
+
+			-- Restore the weapon's original orientation too.
+			local joint =
+				state.Joint
+
+			if joint
+				and joint.Parent then
+
+				pcall(function()
+					joint.C0 =
+						state.JointC0
+
+					joint.C1 =
+						state.JointC1
+				end)
+			end
+		end
+	end
+
+	table.clear(
+		ORIGINAL_WEAPON_MESH_STATE
+	)
+
+	WeaponPackRuntime.currentReplacementPart =
+		nil
+
+	WeaponPackRuntime.currentReplacementWeaponName =
+		nil
+
+	WeaponPackRuntime.currentReplacementCharacter =
+		nil
+
+	return restored
+end
+
+local function getHarvesterTargetRotation(character)
+	if not character then
+		return nil
+	end
+
+	local gunBelt =
+		character:FindFirstChild(
+			"GunBelt",
+			true
+		)
+
+	if not gunBelt
+		or not gunBelt:IsA("Attachment") then
+
+		return nil
+	end
+
+	-- Exact Harvester attachment transform from your weapon data.
+	local harvesterAttachment =
+		CFrame.new(
+			0.1299028992652893,
+			0.000002229222218375071,
+			0.07500199228525162
+		)
+		* CFrame.Angles(
+			math.rad(
+				-0.0026997302193194628
+			),
+			math.rad(-60),
+			math.rad(
+				90.00231170654297
+			)
+		)
+
+	-- This is the same orientation relationship that made
+	-- Harvester sit correctly in the earlier version.
+	local target =
+		gunBelt.WorldCFrame
+		* harvesterAttachment:Inverse()
+
+	return target.Rotation
+end
+
+local function orientLongGunCorrectly(
+	part,
+	character,
+	weaponName,
+	visual
+)
+	if (
+		weaponName ~= "Harvester"
+		and weaponName ~= "Icepiercer"
+	)
+		or not part
+		or not character
+		or not visual then
+
+		return
+	end
+
+	local attributeName =
+		weaponName == "Harvester"
+		and "BotControllerHarvesterSidewaysFixed"
+		or "BotControllerIcepiercerSidewaysFixed"
+
+	if part:GetAttribute(
+		attributeName
+	) == true then
+
+		return
+	end
+
+	local gunBelt =
+		character:FindFirstChild(
+			"GunBelt",
+			true
+		)
+
+	if not gunBelt
+		or not gunBelt:IsA("Attachment") then
+
+		return
+	end
+
+	local joint =
+		findWeaponBodyJoint(
+			part,
+			character
+		)
+
+	if not joint then
+		return
+	end
+
+	local attachmentPosition =
+		visual.AttachmentPosition
+		or Vector3.zero
+
+	local attachmentOrientation =
+		visual.AttachmentOrientation
+		or Vector3.zero
+
+	local weaponAttachment =
+		CFrame.new(
+			attachmentPosition
+		)
+		* CFrame.Angles(
+			math.rad(
+				attachmentOrientation.X
+			),
+			math.rad(
+				attachmentOrientation.Y
+			),
+			math.rad(
+				attachmentOrientation.Z
+			)
+		)
+
+	local desired =
+		gunBelt.WorldCFrame
+		* weaponAttachment:Inverse()
+
+	-- TEST CORRECTION:
+	-- Both long guns use the same source attachment orientation.
+	-- Add a 90-degree roll to the WEAPON ONLY so the long body
+	-- sits sideways rather than vertical.
+	desired =
+		desired
+		* CFrame.Angles(
+			math.rad(90),
+			0,
+			0
+		)
+
+	-- Solve only the weapon-side joint offset.
+	-- The character/body side is NEVER changed.
+	if joint.Part1 == part then
+		joint.C1 =
+			desired:ToObjectSpace(
+				joint.Part0.CFrame
+				* joint.C0
+			)
+
+	elseif joint.Part0 == part then
+		joint.C0 =
+			desired:ToObjectSpace(
+				joint.Part1.CFrame
+				* joint.C1
+			)
+	else
+		return
+	end
+
+	part:SetAttribute(
+		attributeName,
+		true
+	)
+end
+
+
+local function placeVerifiedBackWeapon(
+	part,
+	character,
+	weaponName,
+	visual
+)
+	if weaponName ~= "Celestial"
+		or not part
+		or not character
+		or not visual then
+
+		return
+	end
+
+	if part:GetAttribute(
+		"BotControllerCelestialBackFixed"
+	) == true then
+
+		return
+	end
+
+	local knifeBack =
+		character:FindFirstChild(
+			"KnifeBack",
+			true
+		)
+
+	if not knifeBack
+		or not knifeBack:IsA("Attachment") then
+
+		return
+	end
+
+	local joint =
+		findWeaponBodyJoint(
+			part,
+			character
+		)
+
+	if not joint then
+		return
+	end
+
+	local attachmentPosition =
+		visual.AttachmentPosition
+		or Vector3.zero
+
+	local attachmentOrientation =
+		visual.AttachmentOrientation
+		or Vector3.zero
+
+	local weaponAttachment =
+		CFrame.new(
+			attachmentPosition
+		)
+		* CFrame.Angles(
+			math.rad(
+				attachmentOrientation.X
+			),
+			math.rad(
+				attachmentOrientation.Y
+			),
+			math.rad(
+				attachmentOrientation.Z
+			)
+		)
+
+	local desiredWeaponCFrame =
+		knifeBack.WorldCFrame
+		* weaponAttachment:Inverse()
+
+	-- Change ONLY the weapon side of the joint.
+	if joint.Part1 == part then
+		joint.C1 =
+			desiredWeaponCFrame:ToObjectSpace(
+				joint.Part0.CFrame
+				* joint.C0
+			)
+
+	elseif joint.Part0 == part then
+		joint.C0 =
+			desiredWeaponCFrame:ToObjectSpace(
+				joint.Part1.CFrame
+				* joint.C1
+			)
+	else
+		return
+	end
+
+	part:SetAttribute(
+		"BotControllerCelestialBackFixed",
+		true
+	)
+end
+
+local function placeGunUsingExactAttachment(
+	part,
+	character,
+	weaponName,
+	visual
+)
+	if not part
+		or not character
+		or not visual
+		or weaponName == "Harvester"
+		or weaponName == "Icepiercer"
+		or visual.Type ~= "Gun"
+		or not visual.AttachmentPosition
+		or not visual.AttachmentOrientation then
+
+		return
+	end
+
+	local gunBelt =
+		character:FindFirstChild(
+			"GunBelt",
+			true
+		)
+
+	if not gunBelt
+		or not gunBelt:IsA("Attachment") then
+
+		return
+	end
+
+	local joint =
+		findWeaponBodyJoint(
+			part,
+			character
+		)
+
+	if not joint then
+		return
+	end
+
+	local orientation =
+		visual.AttachmentOrientation
+
+	local weaponAttachment =
+		CFrame.new(
+			visual.AttachmentPosition
+		)
+		* CFrame.Angles(
+			math.rad(orientation.X),
+			math.rad(orientation.Y),
+			math.rad(orientation.Z)
+		)
+
+	local desired =
+		gunBelt.WorldCFrame
+		* weaponAttachment:Inverse()
+
+	-- Weapon side only. Never rotate the avatar/body side.
+	if joint.Part1 == part then
+		joint.C1 =
+			desired:ToObjectSpace(
+				joint.Part0.CFrame
+				* joint.C0
+			)
+	elseif joint.Part0 == part then
+		joint.C0 =
+			desired:ToObjectSpace(
+				joint.Part1.CFrame
+				* joint.C1
+			)
+	end
+end
+
+local function applyVisualToExistingSpecialMesh(
+	candidate,
+	visual,
+	weaponName
+)
+	if not candidate
+		or not candidate.part
+		or not candidate.part.Parent
+		or not candidate.mesh
+		or not candidate.mesh.Parent then
+
+		return false
+	end
+
+	local part =
+		candidate.part
+
+	local mesh =
+		candidate.mesh
+
+	local character =
+		player.Character
+
+	-- Save the exact original mesh AND the weapon-side joint.
+	saveOriginalWeaponMeshState(
+		part,
+		mesh,
+		character
+	)
+
+	-- Replace only the existing SpecialMesh.
+	mesh.MeshType =
+		Enum.MeshType.FileMesh
+
+	mesh.MeshId =
+		visual.MeshId
+
+	mesh.TextureId =
+		visual.TextureId or ""
+
+	-- Use Harvester's REAL scale.
+	-- No negative/mirrored scale.
+	mesh.Scale =
+		visual.Scale
+		or Vector3.new(1, 1, 1)
+
+	mesh.Offset =
+		visual.Offset
+		or Vector3.zero
+
+	if visual.VertexColor then
+		mesh.VertexColor =
+			visual.VertexColor
+	end
+
+	if visual.Color then
+		part.Color =
+			visual.Color
+	end
+
+	if visual.Material then
+		part.Material =
+			visual.Material
+	end
+
+	if visual.Transparency ~= nil then
+		part.Transparency =
+			visual.Transparency
+	else
+		part.Transparency = 0
+	end
+
+	if visual.Reflectance ~= nil then
+		part.Reflectance =
+			visual.Reflectance
+	end
+
+	part.LocalTransparencyModifier = 0
+
+	part:SetAttribute(
+		"BotControllerWeaponReplacement",
+		weaponName
+	)
+
+	-- Keep an exact pointer to the REAL MM2 host.
+	-- Persistence can now tell the difference between the actual
+	-- gun and our own workspace backup visual.
+	WeaponPackRuntime.currentReplacementPart =
+		part
+
+	WeaponPackRuntime.currentReplacementWeaponName =
+		weaponName
+
+	WeaponPackRuntime.currentReplacementCharacter =
+		character
+
+	-- Turn only the existing weapon sideways.
+	-- Does not modify the character's body weld side.
+	orientLongGunCorrectly(
+		part,
+		character,
+		weaponName,
+		visual
+	)
+
+	placeVerifiedBackWeapon(
+		part,
+		character,
+		weaponName,
+		visual
+	)
+
+	placeGunUsingExactAttachment(
+		part,
+		character,
+		weaponName,
+		visual
+	)
+
+	return true
+end
+
+local function replaceCurrentEquippedWeaponMesh(character, weaponName, allowDeepSearch)
+	if not character then
+		return false, "character missing"
+	end
+
+	local visual =
+		getWeaponVisualData(weaponName, allowDeepSearch)
+
+	if not visual then
+		return false,
+			"no SpecialMesh data for " ..
+			tostring(weaponName)
+	end
+
+	-- Remove only old cosmetic weapons made by earlier script versions.
+	local oldScriptWeapon =
+		character:FindFirstChild("HolsteredWeapon")
+
+	if oldScriptWeapon then
+		oldScriptWeapon:Destroy()
+	end
+
+	local candidates =
+		getCurrentWeaponSpecialMeshCandidates(
+			character,
+			visual.Type or "Gun"
+		)
+
+	if #candidates == 0 then
+		return false,
+			"current weapon SpecialMesh not found"
+	end
+
+	-- Only modify the single best-matching CURRENT weapon.
+	local best =
+		candidates[1]
+
+	local success =
+		applyVisualToExistingSpecialMesh(
+			best,
+			visual,
+			weaponName
+		)
+
+	if not success then
+		return false,
+			"could not edit current weapon SpecialMesh"
+	end
+
+	-- Real MM2 gun exists again. Keep the workspace backup READY,
+	-- but invisible, so a round-end deletion can be covered instantly.
+	if WeaponPackRuntime.setPersistentGunFallbackVisible then
+		WeaponPackRuntime.setPersistentGunFallbackVisible(
+			false
+		)
+	end
+
+	return true
+end
+
+local function scanWeapons()
+	table.clear(availableWeaponNames)
+
+	for _, name in ipairs(WEAPON_LIST) do
+		table.insert(
+			availableWeaponNames,
+			name
+		)
+	end
+
+	weaponStatus.Text =
+		"Loaded " ..
+		#availableWeaponNames ..
+		" verified weapons"
+
+	weaponStatus.TextColor3 =
+		Color3.fromRGB(
+			90,
+			235,
+			130
+		)
+end
+
+equipPlayerWeapon = function(name)
+	local character =
+		player.Character
+
+	if not character then
+		return
+	end
+
+	local wantedName = nil
+
+	for _, configuredName in ipairs(WEAPON_LIST) do
+		if isWeaponNameMatch(
+			name,
+			configuredName
+		) then
+
+			wantedName =
+				configuredName
+
+			break
+		end
+	end
+
+	if not wantedName then
+		weaponStatus.Text =
+			"Weapon not in configured list"
+
+		weaponStatus.TextColor3 =
+			Color3.fromRGB(255, 105, 105)
+
+		return
+	end
+
+	weaponStatus.Text =
+		"Loading " .. wantedName .. "..."
+
+	weaponStatus.TextColor3 =
+		Color3.fromRGB(200, 200, 210)
+
+	local success, reason =
+		replaceCurrentEquippedWeaponMesh(
+			character,
+			wantedName,
+			true
+		)
+
+	if not success then
+		weaponStatus.Text =
+			"Could not load " ..
+			wantedName ..
+			": " ..
+			tostring(reason)
+
+		weaponStatus.TextColor3 =
+			Color3.fromRGB(255, 105, 105)
+
+		return
+	end
+
+	selectedWeaponName =
+		wantedName
+
+	WeaponPackRuntime.bindPlayerWeaponPersistence(
+		character
+	)
+
+	local equippedVisual =
+		getWeaponVisualData(
+			wantedName
+		)
+
+	if equippedVisual
+		and equippedVisual.Type == "Gun" then
+
+		-- Build the backup NOW while all body placement data exists.
+		-- It stays hidden until the real MM2 gun disappears.
+		WeaponPackRuntime.ensurePersistentGunFallback(
+			character,
+			wantedName,
+			false
+		)
+	else
+		WeaponPackRuntime.destroyPersistentGunFallback()
+	end
+
+	weaponBox.Text =
+		wantedName
+
+	weaponStatus.Text =
+		"Equipped " ..
+		wantedName
+
+	weaponStatus.TextColor3 =
+		Color3.fromRGB(90, 235, 130)
+end
+
+local function removePlayerWeaponReplacement()
+	-- Stop automatic reapplication first.
+	selectedWeaponName = nil
+
+	WeaponPackRuntime.weaponPersistenceGeneration += 1
+
+	WeaponPackRuntime.roundReequipGeneration =
+		(WeaponPackRuntime.roundReequipGeneration or 0)
+		+ 1
+
+	WeaponPackRuntime.destroyPersistentGunFallback()
+
+	WeaponPackRuntime.currentReplacementPart =
+		nil
+
+	WeaponPackRuntime.currentReplacementWeaponName =
+		nil
+
+	WeaponPackRuntime.currentReplacementCharacter =
+		nil
+
+	local restored =
+		restoreOriginalWeaponMeshes()
+
+	-- Remove any leftover cosmetic weapon from older script versions.
+	local character =
+		player.Character
+
+	if character then
+		local old =
+			character:FindFirstChild("HolsteredWeapon")
+
+		if old then
+			old:Destroy()
+		end
+
+		if WeaponPackRuntime.removePersistentGunFallback then
+			WeaponPackRuntime.removePersistentGunFallback(
+				character
+			)
+		end
+	end
+
+	weaponBox.Text = ""
+
+	if restored > 0 then
+		weaponStatus.Text = "Original weapon restored"
+		weaponStatus.TextColor3 = Color3.fromRGB(90, 235, 130)
+	else
+		weaponStatus.Text = "Weapon replacement removed"
+		weaponStatus.TextColor3 = Color3.fromRGB(200, 200, 210)
+	end
+end
+
+removeWeaponButton.MouseButton1Click:Connect(function()
+	removePlayerWeaponReplacement()
+end)
+
+equipWeaponButton.MouseButton1Click:Connect(function()
+	equipPlayerWeapon(weaponBox.Text)
+end)
+
+weaponBox.FocusLost:Connect(function(enterPressed)
+	if enterPressed then
+		equipPlayerWeapon(weaponBox.Text)
+	end
+end)
+
+scanWeapons()
+
+
+rebuildWeaponButtons()
+
+--------------------------------------------------
+-- KEEP PLAYER GUN VISIBLE THROUGH ROUND TRANSITIONS
+--
+-- IMPORTANT DESIGN:
+-- * The backup gun lives in WORKSPACE, not inside Character.
+--   MM2's round cleanup can delete Character weapon descendants.
+-- * The backup is created BEFORE it is needed and normally hidden.
+-- * If the real MM2 gun host starts disappearing, the backup becomes
+--   visible immediately.
+-- * The real MM2 gun is always preferred. Once it returns and gets
+--   its mesh replaced again, the backup becomes invisible.
+--------------------------------------------------
+
+local nextWeaponMeshRefresh = 0
+
+WeaponPackRuntime.currentReplacementPart =
+	WeaponPackRuntime.currentReplacementPart
+	or nil
+
+WeaponPackRuntime.currentReplacementWeaponName =
+	WeaponPackRuntime.currentReplacementWeaponName
+	or nil
+
+WeaponPackRuntime.currentReplacementCharacter =
+	WeaponPackRuntime.currentReplacementCharacter
+	or nil
+
+WeaponPackRuntime.persistentGunFallback =
+	WeaponPackRuntime.persistentGunFallback
+	or nil
+
+WeaponPackRuntime.persistentGunFallbackCharacter =
+	WeaponPackRuntime.persistentGunFallbackCharacter
+	or nil
+
+WeaponPackRuntime.persistentGunFallbackWeapon =
+	WeaponPackRuntime.persistentGunFallbackWeapon
+	or nil
+
+WeaponPackRuntime.lastGunBeltLocalCFrame =
+	WeaponPackRuntime.lastGunBeltLocalCFrame
+	or nil
+
+WeaponPackRuntime.playerWeaponPersistenceConnection =
+	WeaponPackRuntime.playerWeaponPersistenceConnection
+	or nil
+
+WeaponPackRuntime.playerWeaponRemovingConnection =
+	WeaponPackRuntime.playerWeaponRemovingConnection
+	or nil
+
+WeaponPackRuntime.weaponPersistenceGeneration =
+	WeaponPackRuntime.weaponPersistenceGeneration
+	or 0
+
+WeaponPackRuntime.getPersistentVisualFolder =
+	function()
+		local folder =
+			workspace:FindFirstChild(
+				"SlaveControllerVisuals"
+			)
+
+		if not folder then
+			folder =
+				Instance.new(
+					"Folder"
+				)
+
+			folder.Name =
+				"SlaveControllerVisuals"
+
+			folder.Parent =
+				workspace
+		end
+
+		return folder
+	end
+
+WeaponPackRuntime.findBodyGunBelt =
+	function(character)
+		if not character then
+			return nil
+		end
+
+		local torso =
+			character:FindFirstChild(
+				"LowerTorso"
+			)
+			or character:FindFirstChild(
+				"Torso"
+			)
+
+		if torso then
+			local direct =
+				torso:FindFirstChild(
+					"GunBelt"
+				)
+
+			if direct
+				and direct:IsA(
+					"Attachment"
+				) then
+
+				return direct
+			end
+		end
+
+		-- Fallback recursive search, but ONLY accept an attachment
+		-- whose parent is an actual body part directly under Character.
+		for _, object in ipairs(
+			character:GetDescendants()
+		) do
+			if object:IsA("Attachment")
+				and object.Name == "GunBelt"
+				and object.Parent
+				and object.Parent:IsA("BasePart")
+				and object.Parent.Parent == character
+				and PLAYER_BODY_NAMES[
+					object.Parent.Name
+				] then
+
+				return object
+			end
+		end
+
+		return nil
+	end
+
+WeaponPackRuntime.destroyPersistentGunFallback =
+	function()
+		local model =
+			WeaponPackRuntime.persistentGunFallback
+
+		if model
+			and model.Parent then
+
+			model:Destroy()
+		end
+
+		WeaponPackRuntime.persistentGunFallback =
+			nil
+
+		WeaponPackRuntime.persistentGunFallbackCharacter =
+			nil
+
+		WeaponPackRuntime.persistentGunFallbackWeapon =
+			nil
+	end
+
+-- Backwards-compatible name used by REMOVE WEAPON in older code.
+WeaponPackRuntime.removePersistentGunFallback =
+	function(character)
+		WeaponPackRuntime.destroyPersistentGunFallback()
+	end
+
+WeaponPackRuntime.setPersistentGunFallbackVisible =
+	function(visible)
+		local model =
+			WeaponPackRuntime.persistentGunFallback
+
+		if not model
+			or not model.Parent then
+
+			return false
+		end
+
+		for _, object in ipairs(
+			model:GetDescendants()
+		) do
+			if object:IsA("BasePart") then
+				object.LocalTransparencyModifier =
+					visible
+					and 0
+					or 1
+			elseif object:IsA("ParticleEmitter")
+				or object:IsA("Trail")
+				or object:IsA("Beam") then
+
+				object.Enabled =
+					visible
+			end
+		end
+
+		model:SetAttribute(
+			"FallbackVisible",
+			visible
+		)
+
+		return true
+	end
+
+WeaponPackRuntime.ensurePersistentGunFallback =
+	function(character, weaponName, visible)
+		if not character
+			or character ~= player.Character
+			or not weaponName then
+
+			return false
+		end
+
+		local visual =
+			getWeaponVisualData(
+				weaponName
+			)
+
+		if not visual
+			or visual.Type ~= "Gun" then
+
+			WeaponPackRuntime.destroyPersistentGunFallback()
+			return false
+		end
+
+		local existing =
+			WeaponPackRuntime.persistentGunFallback
+
+		if existing
+			and existing.Parent
+			and WeaponPackRuntime.persistentGunFallbackCharacter
+				== character
+			and WeaponPackRuntime.persistentGunFallbackWeapon
+				== weaponName then
+
+			WeaponPackRuntime.setPersistentGunFallbackVisible(
+				visible == true
+			)
+
+			return true
+		end
+
+		WeaponPackRuntime.destroyPersistentGunFallback()
+
+		local source =
+			cloneWeaponAsTool(
+				weaponName
+			)
+
+		if not source then
+			return false
+		end
+
+		local model =
+			prepareWeaponVisual(
+				source,
+				weaponName,
+				"PersistentGunFallback"
+			)
+
+		if not model
+			or not model.PrimaryPart then
+
+			if model then
+				model:Destroy()
+			end
+
+			return false
+		end
+
+		model:SetAttribute(
+			"ScriptOwnedWeapon",
+			true
+		)
+
+		model:SetAttribute(
+			"OwnerUserId",
+			player.UserId
+		)
+
+		local bodyAttachment =
+			WeaponPackRuntime.findBodyGunBelt(
+				character
+			)
+
+		local anchor =
+			bodyAttachment
+			and bodyAttachment.Parent
+			or character:FindFirstChild(
+				"LowerTorso"
+			)
+			or character:FindFirstChild(
+				"Torso"
+			)
+			or character:FindFirstChild(
+				"UpperTorso"
+			)
+			or character:FindFirstChild(
+				"HumanoidRootPart"
+			)
+
+		if not anchor
+			or not anchor:IsA("BasePart") then
+
+			model:Destroy()
+			return false
+		end
+
+		local targetWorldCFrame
+
+		if bodyAttachment then
+			WeaponPackRuntime.lastGunBeltLocalCFrame =
+				bodyAttachment.CFrame
+
+			targetWorldCFrame =
+				bodyAttachment.WorldCFrame
+
+		elseif WeaponPackRuntime.lastGunBeltLocalCFrame then
+			targetWorldCFrame =
+				anchor.CFrame
+				* WeaponPackRuntime.lastGunBeltLocalCFrame
+
+		else
+			targetWorldCFrame =
+				getFallbackBeltWorldCFrame(
+					anchor,
+					"WaistRight"
+				)
+		end
+
+		local data =
+			WEAPON_HOLSTER_DATA[
+				weaponName
+			]
+			or FALLBACK_WEAPON_VISUALS[
+				weaponName
+			]
+			or {
+				AttachmentPosition =
+					Vector3.zero,
+				AttachmentOrientation =
+					Vector3.zero,
+			}
+
+		local weaponAttachmentCFrame =
+			buildAttachmentCFrame(
+				data
+			)
+
+		local finalWorldCFrame =
+			targetWorldCFrame
+			* weaponAttachmentCFrame:Inverse()
+
+		if weaponName == "Harvester"
+			or weaponName == "Icepiercer" then
+
+			finalWorldCFrame =
+				finalWorldCFrame
+				* CFrame.Angles(
+					math.rad(90),
+					0,
+					0
+				)
+		end
+
+		local root =
+			model.PrimaryPart
+
+		root.CFrame =
+			finalWorldCFrame
+
+		-- WORKSPACE parent is deliberate.
+		-- MM2 can clear Character weapon descendants at round end.
+		model.Parent =
+			WeaponPackRuntime.getPersistentVisualFolder()
+
+		local weld =
+			Instance.new(
+				"WeldConstraint"
+			)
+
+		weld.Name =
+			"PersistentGunFallbackWeld"
+
+		weld.Part0 =
+			anchor
+
+		weld.Part1 =
+			root
+
+		weld.Parent =
+			root
+
+		WeaponPackRuntime.persistentGunFallback =
+			model
+
+		WeaponPackRuntime.persistentGunFallbackCharacter =
+			character
+
+		WeaponPackRuntime.persistentGunFallbackWeapon =
+			weaponName
+
+		WeaponPackRuntime.setPersistentGunFallbackVisible(
+			visible == true
+		)
+
+		return true
+	end
+
+WeaponPackRuntime.isCurrentReplacementAlive =
+	function(character, weaponName)
+		local part =
+			WeaponPackRuntime.currentReplacementPart
+
+		if not part
+			or not part.Parent
+			or WeaponPackRuntime.currentReplacementCharacter
+				~= character
+			or WeaponPackRuntime.currentReplacementWeaponName
+				~= weaponName then
+
+			return false
+		end
+
+		return part:GetAttribute(
+			"BotControllerWeaponReplacement"
+		) == weaponName
+	end
+
+WeaponPackRuntime.tryRestoreSelectedWeapon =
+	function(character)
+		if not selectedWeaponName
+			or not character
+			or character ~= player.Character
+			or not character.Parent then
+
+			return false
+		end
+
+		local visual =
+			getWeaponVisualData(
+				selectedWeaponName
+			)
+
+		if not visual then
+			return false
+		end
+
+		if visual.Type == "Gun" then
+			-- Backup is prepared FIRST. If MM2 has no gun host yet,
+			-- the user still sees the selected gun.
+			WeaponPackRuntime.ensurePersistentGunFallback(
+				character,
+				selectedWeaponName,
+				not WeaponPackRuntime.isCurrentReplacementAlive(
+					character,
+					selectedWeaponName
+				)
+			)
+		end
+
+		if WeaponPackRuntime.isCurrentReplacementAlive(
+			character,
+			selectedWeaponName
+		) then
+
+			if visual.Type == "Gun" then
+				WeaponPackRuntime.setPersistentGunFallbackVisible(
+					false
+				)
+			end
+
+			return true
+		end
+
+		local success =
+			replaceCurrentEquippedWeaponMesh(
+				character,
+				selectedWeaponName
+			)
+
+		if success then
+			if visual.Type == "Gun" then
+				WeaponPackRuntime.setPersistentGunFallbackVisible(
+					false
+				)
+			end
+
+			weaponBox.Text =
+				selectedWeaponName
+
+			return true
+		end
+
+		if visual.Type == "Gun" then
+			WeaponPackRuntime.setPersistentGunFallbackVisible(
+				true
+			)
+		end
+
+		return false
+	end
+
+WeaponPackRuntime.roundReequipGeneration =
+	WeaponPackRuntime.roundReequipGeneration
+	or 0
+
+WeaponPackRuntime.forceRoundWeaponReequip =
+	function(character, reason)
+		if not selectedWeaponName
+			or not character
+			or character ~= player.Character
+			or not character.Parent then
+
+			return
+		end
+
+		WeaponPackRuntime.roundReequipGeneration += 1
+
+		local generation =
+			WeaponPackRuntime.roundReequipGeneration
+
+		task.spawn(function()
+			-- Do NOT stop after the first success.
+			-- During a round transition MM2 can:
+			--   1. keep the old gun briefly
+			--   2. delete it
+			--   3. create the lobby/new-round gun later
+			--
+			-- Re-applying for several seconds guarantees we eventually
+			-- hit the FINAL gun object that survives the transition.
+			for attempt = 1, 32 do
+				if generation
+						~= WeaponPackRuntime.roundReequipGeneration
+					or not selectedWeaponName
+					or player.Character ~= character
+					or not character.Parent then
+
+					return
+				end
+
+				local visual =
+					getWeaponVisualData(
+						selectedWeaponName
+					)
+
+				if not visual then
+					return
+				end
+
+				local realStillAlive =
+					WeaponPackRuntime.isCurrentReplacementAlive(
+						character,
+						selectedWeaponName
+					)
+
+				if visual.Type == "Gun"
+					and not realStillAlive then
+
+					WeaponPackRuntime.ensurePersistentGunFallback(
+						character,
+						selectedWeaponName,
+						true
+					)
+				end
+
+				local success =
+					replaceCurrentEquippedWeaponMesh(
+						character,
+						selectedWeaponName
+					)
+
+				if success then
+					if visual.Type == "Gun" then
+						WeaponPackRuntime.setPersistentGunFallbackVisible(
+							false
+						)
+					end
+
+					weaponBox.Text =
+						selectedWeaponName
+
+					weaponStatus.Text =
+						"Equipped " ..
+						selectedWeaponName
+
+					weaponStatus.TextColor3 =
+						Color3.fromRGB(
+							90,
+							235,
+							130
+						)
+				else
+					if visual.Type == "Gun" then
+						WeaponPackRuntime.ensurePersistentGunFallback(
+							character,
+							selectedWeaponName,
+							true
+						)
+					end
+				end
+
+				task.wait(
+					attempt <= 12
+					and 0.15
+					or 0.25
+				)
+			end
+		end)
+	end
+
+WeaponPackRuntime.bindPlayerWeaponPersistence =
+	function(character)
+		if WeaponPackRuntime.playerWeaponPersistenceConnection then
+			WeaponPackRuntime.playerWeaponPersistenceConnection:Disconnect()
+			WeaponPackRuntime.playerWeaponPersistenceConnection =
+				nil
+		end
+
+		if WeaponPackRuntime.playerWeaponRemovingConnection then
+			WeaponPackRuntime.playerWeaponRemovingConnection:Disconnect()
+			WeaponPackRuntime.playerWeaponRemovingConnection =
+				nil
+		end
+
+		if not character then
+			return
+		end
+
+		WeaponPackRuntime.playerWeaponPersistenceConnection =
+			character.DescendantAdded:Connect(
+				function(descendant)
+					if not selectedWeaponName then
+						return
+					end
+
+					-- New MM2 gun parts can arrive in several stages.
+					if descendant:IsA("SpecialMesh")
+						or descendant:IsA("BasePart")
+						or descendant:IsA("Attachment")
+						or descendant:IsA("Accessory")
+						or descendant:IsA("Tool") then
+
+						nextWeaponMeshRefresh =
+							0
+
+						WeaponPackRuntime.forceRoundWeaponReequip(
+							character,
+							"current gun removed"
+						)
+					end
+				end
+			)
+
+		WeaponPackRuntime.playerWeaponRemovingConnection =
+			character.DescendantRemoving:Connect(
+				function(descendant)
+					if not selectedWeaponName then
+						return
+					end
+
+					local visual =
+						getWeaponVisualData(
+							selectedWeaponName
+						)
+
+					if not visual
+						or visual.Type ~= "Gun" then
+
+						return
+					end
+
+					local current =
+						WeaponPackRuntime.currentReplacementPart
+
+					local removingCurrent =
+						false
+
+					if current
+						and current.Parent then
+
+						if descendant == current then
+							removingCurrent =
+								true
+
+						elseif descendant:IsA("SpecialMesh")
+							and descendant.Parent == current then
+
+							removingCurrent =
+								true
+
+						elseif current:IsDescendantOf(
+							descendant
+						) then
+
+							removingCurrent =
+								true
+						end
+					end
+
+					if removingCurrent then
+						-- Make the ready workspace backup visible BEFORE
+						-- MM2 finishes deleting the real host.
+						WeaponPackRuntime.ensurePersistentGunFallback(
+							character,
+							selectedWeaponName,
+							true
+						)
+
+						WeaponPackRuntime.currentReplacementPart =
+							nil
+
+						WeaponPackRuntime.currentReplacementWeaponName =
+							nil
+
+						WeaponPackRuntime.currentReplacementCharacter =
+							nil
+
+						nextWeaponMeshRefresh =
+							0
+					end
+				end
+			)
+	end
+
+WeaponPackRuntime.bindPlayerWeaponPersistence(
+	player.Character
+)
+
+--------------------------------------------------
+-- ROUND TRANSITION WEAPON WATCH
+--
+-- Independent from the bot movement loop.
+-- A large player teleport happens when MM2 moves between lobby/map.
+-- Force the selected weapon to be re-equipped throughout that transition.
+--------------------------------------------------
+
+WeaponPackRuntime.lastWeaponRoundPosition =
+	WeaponPackRuntime.lastWeaponRoundPosition
+	or nil
+
+WeaponPackRuntime.nextRoundTeleportWeaponTrigger =
+	WeaponPackRuntime.nextRoundTeleportWeaponTrigger
+	or 0
+
+RunService.Heartbeat:Connect(function()
+	local character =
+		player.Character
+
+	if not character
+		or not character.Parent then
+
+		WeaponPackRuntime.lastWeaponRoundPosition =
+			nil
+
+		return
+	end
+
+	local root =
+		character:FindFirstChild(
+			"HumanoidRootPart"
+		)
+
+	if not root then
+		return
+	end
+
+	local previous =
+		WeaponPackRuntime.lastWeaponRoundPosition
+
+	if previous then
+		local moved =
+			(
+				root.Position
+				- previous
+			).Magnitude
+
+		if moved >=
+				ROUND_TELEPORT_DETECT_DISTANCE
+			and time() >=
+				WeaponPackRuntime.nextRoundTeleportWeaponTrigger then
+
+			WeaponPackRuntime.nextRoundTeleportWeaponTrigger =
+				time() + 1.5
+
+			if selectedWeaponName then
+				WeaponPackRuntime.forceRoundWeaponReequip(
+					character,
+					"round/map teleport"
+				)
+			end
+		end
+	end
+
+	WeaponPackRuntime.lastWeaponRoundPosition =
+		root.Position
+end)
+
+-- A single low-cost watchdog/state machine.
+-- While the real gun is alive, it only checks the stored Instance pointer.
+-- Expensive candidate scanning happens only after that pointer disappears.
+RunService.Heartbeat:Connect(function()
+	if not selectedWeaponName then
+		return
+	end
+
+	if time() <
+		nextWeaponMeshRefresh then
+
+		return
+	end
+
+	local character =
+		player.Character
+
+	if not character
+		or not character.Parent then
+
+		return
+	end
+
+	local visual =
+		getWeaponVisualData(
+			selectedWeaponName
+		)
+
+	if not visual then
+		return
+	end
+
+	if WeaponPackRuntime.isCurrentReplacementAlive(
+		character,
+		selectedWeaponName
+	) then
+		if visual.Type == "Gun" then
+			WeaponPackRuntime.ensurePersistentGunFallback(
+				character,
+				selectedWeaponName,
+				false
+			)
+		end
+
+		nextWeaponMeshRefresh =
+			time() + 0.75
+
+		return
+	end
+
+	-- The real host is gone. Show the already-prepared backup immediately.
+	if visual.Type == "Gun" then
+		WeaponPackRuntime.ensurePersistentGunFallback(
+			character,
+			selectedWeaponName,
+			true
+		)
+	end
+
+	-- Retry acquiring MM2's newly-created gun at a controlled rate.
+	WeaponPackRuntime.tryRestoreSelectedWeapon(
+		character
+	)
+
+	nextWeaponMeshRefresh =
+		time() + 0.35
+end)
+
+player.CharacterAdded:Connect(function(character)
+	WeaponPackRuntime.currentReplacementPart =
+		nil
+
+	WeaponPackRuntime.currentReplacementWeaponName =
+		nil
+
+	WeaponPackRuntime.currentReplacementCharacter =
+		nil
+
+	WeaponPackRuntime.destroyPersistentGunFallback()
+
+	WeaponPackRuntime.bindPlayerWeaponPersistence(
+		character
+	)
+
+	if not selectedWeaponName then
+		return
+	end
+
+	task.spawn(function()
+		character:WaitForChild(
+			"HumanoidRootPart",
+			10
+		)
+
+		if not selectedWeaponName
+			or player.Character ~= character then
+
+			return
+		end
+
+		local visual =
+			getWeaponVisualData(
+				selectedWeaponName
+			)
+
+		if visual
+			and visual.Type == "Gun" then
+
+			-- On a fresh character, create the backup immediately,
+			-- visible until MM2 creates its real gun host.
+			WeaponPackRuntime.ensurePersistentGunFallback(
+				character,
+				selectedWeaponName,
+				true
+			)
+		end
+
+		-- Keep the existing quick restore attempts.
+		for _ = 1, 20 do
+			if not selectedWeaponName
+				or player.Character ~= character
+				or not character.Parent then
+
+				return
+			end
+
+			WeaponPackRuntime.tryRestoreSelectedWeapon(
+				character
+			)
+
+			task.wait(0.15)
+		end
+
+		-- Then run the full transition re-equip loop.
+		WeaponPackRuntime.forceRoundWeaponReequip(
+			character,
+			"character added"
+		)
+	end)
+end)
+
+--------------------------------------------------
+-- LABEL UPDATE
+--------------------------------------------------
+
+local function updateLabels()
+
+	countLabel.Text =
+		"BOTS:  " .. botCount
+
+	distanceLabel.Text =
+		"DISTANCE:  " .. followDistance
+
+	chatButton.Text =
+		"CHAT: " .. (chatEnabled and "ON" or "OFF")
+
+end
+
+updateLabels()
+
+--------------------------------------------------
+-- RANDOM POSITION
+--------------------------------------------------
+
+local function chooseNewPosition(bot)
+
+	local angle =
+		math.rad(math.random(0, 360))
+
+	local distance =
+		math.random(
+			MIN_DISTANCE,
+			MAX_DISTANCE
+		)
+
+	bot.angle = angle
+	bot.distance = distance
+
+	-- Softer personal offset so bots do not all snap
+	-- to a perfectly synchronized formation.
+	bot.personalDriftX =
+		math.random(
+			-math.floor(PERSONAL_OFFSET_DRIFT * 10),
+			 math.floor(PERSONAL_OFFSET_DRIFT * 10)
+		) / 10
+
+	bot.personalDriftZ =
+		math.random(
+			-math.floor(PERSONAL_OFFSET_DRIFT * 10),
+			 math.floor(PERSONAL_OFFSET_DRIFT * 10)
+		) / 10
+
+	bot.sideOffset =
+		math.sin(angle) * distance +
+		bot.personalDriftX
+
+	bot.backOffset =
+		math.cos(angle) * distance +
+		bot.personalDriftZ
+
+	bot.nextChange =
+		time() +
+		math.random(
+			POSITION_CHANGE_MIN + 2,
+			POSITION_CHANGE_MAX + 5
+		)
+
+end
+
+--------------------------------------------------
+-- PERMANENT AVATAR LIST RESOLVER
+--------------------------------------------------
+
+local function resolvePermanentAvatars()
+	table.clear(BOT_AVATARS)
+
+	local seenIds = {}
+
+	for _, entry in ipairs(BOT_AVATAR_ENTRIES) do
+		local userId
+		local username
+
+		if typeof(entry) == "number" then
+			userId = entry
+
+			local okName, resolvedName = pcall(function()
+				return Players:GetNameFromUserIdAsync(userId)
+			end)
+
+			if okName and resolvedName then
+				username = resolvedName
+			end
+
+		elseif typeof(entry) == "string" then
+			local trimmed = entry:match("^%s*(.-)%s*$")
+
+			if trimmed and trimmed ~= "" then
+				if trimmed:match("^%d+$") then
+					userId = tonumber(trimmed)
+
+					local okName, resolvedName = pcall(function()
+						return Players:GetNameFromUserIdAsync(userId)
+					end)
+
+					if okName and resolvedName then
+						username = resolvedName
+					end
+				else
+					local okId, resolvedId = pcall(function()
+						return Players:GetUserIdFromNameAsync(trimmed)
+					end)
+
+					if okId and resolvedId then
+						userId = resolvedId
+
+						local okName, resolvedName = pcall(function()
+							return Players:GetNameFromUserIdAsync(userId)
+						end)
+
+						username = (okName and resolvedName) or trimmed
+					end
+				end
+			end
+		end
+
+		if userId and username and not seenIds[userId] then
+			seenIds[userId] = true
+
+			table.insert(BOT_AVATARS, {
+				userId = userId,
+				username = username,
+			})
+		else
+			warn("Could not resolve bot avatar entry:", entry)
+		end
+	end
+end
+
+local function resetAvailableAvatarPool()
+	table.clear(AVAILABLE_BOT_AVATARS)
+
+	for _, avatar in ipairs(BOT_AVATARS) do
+		table.insert(AVAILABLE_BOT_AVATARS, avatar)
+	end
+
+	-- Fisher-Yates shuffle:
+	-- random order, but every avatar can only be used once.
+	for i = #AVAILABLE_BOT_AVATARS, 2, -1 do
+		local j = math.random(1, i)
+
+		AVAILABLE_BOT_AVATARS[i],
+		AVAILABLE_BOT_AVATARS[j] =
+			AVAILABLE_BOT_AVATARS[j],
+			AVAILABLE_BOT_AVATARS[i]
+	end
+end
+
+-- Resolve usernames first, THEN build the unique spawn pool.
+resolvePermanentAvatars()
+resetAvailableAvatarPool()
+
+local function addAvatarEntryFromUI(entry)
+	if not entry or not entry:match("%S") then
+		addAvatarStatus.Text = "Enter a username or user ID"
+		addAvatarStatus.TextColor3 = Color3.fromRGB(255, 105, 105)
+		return
+	end
+
+	entry = entry:match("^%s*(.-)%s*$")
+
+	local userId
+	local username
+
+	if entry:match("^%d+$") then
+		userId = tonumber(entry)
+
+		local okName, resolvedName = pcall(function()
+			return Players:GetNameFromUserIdAsync(userId)
+		end)
+
+		if okName and resolvedName then
+			username = resolvedName
+		end
+	else
+		local okId, resolvedId = pcall(function()
+			return Players:GetUserIdFromNameAsync(entry)
+		end)
+
+		if okId and resolvedId then
+			userId = resolvedId
+
+			local okName, resolvedName = pcall(function()
+				return Players:GetNameFromUserIdAsync(userId)
+			end)
+
+			username = (okName and resolvedName) or entry
+		end
+	end
+
+	if not userId or not username then
+		addAvatarStatus.Text = "Could not resolve that account"
+		addAvatarStatus.TextColor3 = Color3.fromRGB(255, 105, 105)
+		return
+	end
+
+	-- Prevent duplicate account IDs in the master resolved list.
+	for _, avatar in ipairs(BOT_AVATARS) do
+		if avatar.userId == userId then
+			addAvatarStatus.Text = username .. " is already added"
+			addAvatarStatus.TextColor3 = Color3.fromRGB(255, 190, 90)
+			return
+		end
+	end
+
+	local avatar = {
+		userId = userId,
+		username = username,
+	}
+
+	table.insert(BOT_AVATARS, avatar)
+
+	-- Also add it to the currently available pool if not already there.
+	local alreadyAvailable = false
+	for _, available in ipairs(AVAILABLE_BOT_AVATARS) do
+		if available.userId == userId then
+			alreadyAvailable = true
+			break
+		end
+	end
+
+	if not alreadyAvailable then
+		table.insert(AVAILABLE_BOT_AVATARS, avatar)
+	end
+
+	addAvatarStatus.Text = "Added " .. username
+	addAvatarStatus.TextColor3 = Color3.fromRGB(90, 235, 130)
+	addAvatarBox.Text = ""
+end
+
+addAvatarButton.MouseButton1Click:Connect(function()
+	addAvatarEntryFromUI(addAvatarBox.Text)
+end)
+
+addAvatarBox.FocusLost:Connect(function(enterPressed)
+	if enterPressed then
+		addAvatarEntryFromUI(addAvatarBox.Text)
+	end
+end)
+
+--------------------------------------------------
+-- ROUND START SCATTER + SEEK
+--------------------------------------------------
+
+local function getRandomRoundGroundPosition(playerRoot)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+
+	local ignore = {}
+
+	if player.Character then
+		table.insert(ignore, player.Character)
+	end
+
+	for _, bot in ipairs(bots) do
+		if bot.model then
+			table.insert(ignore, bot.model)
+		end
+	end
+
+	params.FilterDescendantsInstances = ignore
+
+	-- Keep bots on roughly the same floor as the player.
+	for _ = 1, ROUND_SCATTER_ATTEMPTS do
+		local angle = math.rad(math.random(0, 359))
+		local distance = math.random(
+			ROUND_SCATTER_MIN_DISTANCE * 10,
+			ROUND_SCATTER_MAX_DISTANCE * 10
+		) / 10
+
+		local offset = Vector3.new(
+			math.cos(angle) * distance,
+			0,
+			math.sin(angle) * distance
+		)
+
+		local candidate =
+			playerRoot.Position + offset
+
+		-- Only search a short vertical range so we don't
+		-- accidentally place bots on another floor / roof.
+		local origin =
+			candidate + Vector3.new(0, 18, 0)
+
+		local result = workspace:Raycast(
+			origin,
+			Vector3.new(0, -36, 0),
+			params
+		)
+
+		if result then
+			local yDifference =
+				math.abs(
+					result.Position.Y -
+					playerRoot.Position.Y
+				)
+
+			if yDifference <= 8 then
+				return result.Position + Vector3.new(0, 3, 0)
+			end
+		end
+	end
+
+	-- Safe fallback: keep them near the player.
+	local angle = math.rad(math.random(0, 359))
+	local distance = math.random(28, 40)
+
+	return playerRoot.Position + Vector3.new(
+		math.cos(angle) * distance,
+		2,
+		math.sin(angle) * distance
+	)
+end
+
+--------------------------------------------------
+-- BOT SMART NAVIGATION / STUCK RECOVERY
+--
+-- Cheap direct MoveTo when route is clear.
+-- Real PathfindingService path only when:
+--   * a wall/obstacle blocks the target
+--   * the bot is repeatedly stuck
+--
+-- This prevents every bot from constantly computing paths.
+--------------------------------------------------
+
+WeaponPackRuntime.botIsGrounded =
+	function(bot)
+		if not bot
+			or not bot.humanoid then
+
+			return false
+		end
+
+		local humanoid =
+			bot.humanoid
+
+		local state =
+			humanoid:GetState()
+
+		return
+			humanoid.FloorMaterial
+				~= Enum.Material.Air
+			and state
+				~= Enum.HumanoidStateType.Freefall
+			and state
+				~= Enum.HumanoidStateType.Jumping
+			and state
+				~= Enum.HumanoidStateType.FallingDown
+	end
+
+WeaponPackRuntime.forceBotJump =
+	function(bot)
+		if not bot
+			or not bot.humanoid
+			or not WeaponPackRuntime.botIsGrounded(
+				bot
+			) then
+
+			return false
+		end
+
+		local now =
+			time()
+
+		if now <
+			(bot.nextObstacleJump or 0) then
+
+			return false
+		end
+
+		bot.nextObstacleJump =
+			now + 0.65
+
+		bot.humanoid.Jump =
+			true
+
+		pcall(function()
+			bot.humanoid:ChangeState(
+				Enum.HumanoidStateType.Jumping
+			)
+		end)
+
+		return true
+	end
+
+WeaponPackRuntime.makeBotRayParams =
+	function(bot)
+		local params =
+			RaycastParams.new()
+
+		params.FilterType =
+			Enum.RaycastFilterType.Exclude
+
+		params.IgnoreWater =
+			true
+
+		local ignore = {}
+
+		if bot
+			and bot.model then
+
+			table.insert(
+				ignore,
+				bot.model
+			)
+		end
+
+		local currentPlayerCharacter =
+			player.Character
+
+		if currentPlayerCharacter then
+			table.insert(
+				ignore,
+				currentPlayerCharacter
+			)
+		end
+
+		for _, otherBot in ipairs(bots) do
+			if otherBot ~= bot
+				and otherBot.model
+				and otherBot.model.Parent then
+
+				table.insert(
+					ignore,
+					otherBot.model
+				)
+			end
+		end
+
+		params.FilterDescendantsInstances =
+			ignore
+
+		return params
+	end
+
+WeaponPackRuntime.isDirectRouteBlocked =
+	function(bot, targetPosition)
+		if not bot
+			or not bot.root
+			or not bot.root.Parent
+			or not targetPosition then
+
+			return false
+		end
+
+		local root =
+			bot.root
+
+		local delta =
+			targetPosition
+			- root.Position
+
+		local horizontal =
+			Vector3.new(
+				delta.X,
+				0,
+				delta.Z
+			)
+
+		local distance =
+			horizontal.Magnitude
+
+		if distance < 2 then
+			return false
+		end
+
+		local direction =
+			horizontal.Unit
+
+		local params =
+			WeaponPackRuntime.makeBotRayParams(
+				bot
+			)
+
+		-- Don't raycast the full distance when the target is very far.
+		-- We only need to know whether the immediate route is blocked.
+		local rayDistance =
+			math.min(
+				distance,
+				8
+			)
+
+		local waistHit =
+			workspace:Raycast(
+				root.Position
+					+ Vector3.new(
+						0,
+						-0.7,
+						0
+					),
+				direction
+					* rayDistance,
+				params
+			)
+
+		local chestHit =
+			workspace:Raycast(
+				root.Position
+					+ Vector3.new(
+						0,
+						1.0,
+						0
+					),
+				direction
+					* rayDistance,
+				params
+			)
+
+		-- If either torso-height ray sees a solid object,
+		-- the direct walking route is not reliable.
+		return waistHit ~= nil
+			or chestHit ~= nil
+	end
+
+WeaponPackRuntime.cancelBotPath =
+	function(bot)
+		if not bot then
+			return
+		end
+
+		bot.pathGeneration =
+			(bot.pathGeneration or 0)
+			+ 1
+
+		bot.pathBusy = false
+		bot.pathActive = false
+	end
+
+WeaponPackRuntime.requestBotPath =
+	function(bot, targetPosition, force)
+		if not bot
+			or not bot.model
+			or not bot.model.Parent
+			or not bot.root
+			or not bot.root.Parent
+			or not bot.humanoid
+			or not targetPosition then
+
+			return false
+		end
+
+		local now =
+			time()
+
+		-- Don't spam new path computations.
+		if not force
+			and now <
+				(bot.nextPathRequest or 0) then
+
+			return bot.pathActive == true
+		end
+
+		-- If a path task is already running and its target is still close
+		-- to the new requested target, let it finish.
+		if bot.pathBusy
+			and bot.pathTarget
+			and (
+				bot.pathTarget
+				- targetPosition
+			).Magnitude < 6 then
+
+			return true
+		end
+
+		bot.nextPathRequest =
+			now + 0.8
+
+		bot.pathTarget =
+			targetPosition
+
+		bot.pathGeneration =
+			(bot.pathGeneration or 0)
+			+ 1
+
+		local generation =
+			bot.pathGeneration
+
+		bot.pathBusy = true
+		bot.pathActive = true
+
+		task.spawn(function()
+			local path =
+				PathfindingService:CreatePath({
+					AgentRadius = 2,
+					AgentHeight = 5,
+					AgentCanJump = true,
+					AgentCanClimb = true,
+					AgentJumpHeight = 7,
+					AgentMaxSlope = 45,
+					WaypointSpacing = 3,
+				})
+
+			local ok =
+				pcall(function()
+					path:ComputeAsync(
+						bot.root.Position,
+						targetPosition
+					)
+				end)
+
+			if generation
+				~= bot.pathGeneration then
+
+				return
+			end
+
+			if not ok
+				or path.Status
+					~= Enum.PathStatus.Success then
+
+				bot.pathBusy = false
+				bot.pathActive = false
+
+				-- Last-resort unstuck attempt.
+				WeaponPackRuntime.forceBotJump(
+					bot
+				)
+
+				return
+			end
+
+			local waypoints =
+				path:GetWaypoints()
+
+			if #waypoints < 2 then
+				bot.pathBusy = false
+				bot.pathActive = false
+				return
+			end
+
+			-- Follow enough of the path to get around the obstacle.
+			-- The normal follow loop will request a fresh path later
+			-- if the player's target has moved substantially.
+			for index = 2, #waypoints do
+				if generation
+						~= bot.pathGeneration
+					or not running
+					or not bot.model
+					or not bot.model.Parent then
+
+					return
+				end
+
+				local waypoint =
+					waypoints[index]
+
+				if waypoint.Action
+					== Enum.PathWaypointAction.Jump then
+
+					WeaponPackRuntime.forceBotJump(
+						bot
+					)
+				end
+
+				bot.lastMoveTarget =
+					waypoint.Position
+
+				bot.humanoid:MoveTo(
+					waypoint.Position
+				)
+
+				local reached = false
+
+				local connection =
+					bot.humanoid.MoveToFinished:Connect(
+						function(success)
+							reached = success
+						end
+					)
+
+				local started =
+					time()
+
+				while generation
+						== bot.pathGeneration
+					and bot.model
+					and bot.model.Parent
+					and time() - started < 1.15 do
+
+					local remaining =
+						(
+							bot.root.Position
+							- waypoint.Position
+						).Magnitude
+
+					if remaining <= 2.4 then
+						reached = true
+						break
+					end
+
+					-- If a low obstacle appears between path waypoints,
+					-- jump it without abandoning the whole path.
+					local params =
+						WeaponPackRuntime.makeBotRayParams(
+							bot
+						)
+
+					local moveDelta =
+						waypoint.Position
+						- bot.root.Position
+
+					local flat =
+						Vector3.new(
+							moveDelta.X,
+							0,
+							moveDelta.Z
+						)
+
+					if flat.Magnitude > 0.2 then
+						local dir =
+							flat.Unit
+
+						local lowHit =
+							workspace:Raycast(
+								bot.root.Position
+									+ Vector3.new(
+										0,
+										-1.4,
+										0
+									),
+								dir * 3,
+								params
+							)
+
+						local highHit =
+							workspace:Raycast(
+								bot.root.Position
+									+ Vector3.new(
+										0,
+										1.1,
+										0
+									),
+								dir * 3,
+								params
+							)
+
+						if lowHit
+							and not highHit then
+
+							WeaponPackRuntime.forceBotJump(
+								bot
+							)
+						end
+					end
+
+					task.wait(0.08)
+				end
+
+				connection:Disconnect()
+
+				if not reached then
+					-- Recompute later rather than hammering an unreachable
+					-- waypoint forever.
+					break
+				end
+			end
+
+			if generation
+				== bot.pathGeneration then
+
+				bot.pathBusy = false
+				bot.pathActive = false
+			end
+		end)
+
+		return true
+	end
+
+WeaponPackRuntime.checkBotStuck =
+	function(bot)
+		if not bot
+			or not bot.root
+			or not bot.root.Parent
+			or not bot.lastMoveTarget then
+
+			return
+		end
+
+		local now =
+			time()
+
+		if now <
+			(bot.nextStuckCheck or 0) then
+
+			return
+		end
+
+		bot.nextStuckCheck =
+			now + 0.65
+
+		local root =
+			bot.root
+
+		local targetDistance =
+			(
+				root.Position
+				- bot.lastMoveTarget
+			).Magnitude
+
+		local previous =
+			bot.lastStuckPosition
+			or root.Position
+
+		local moved =
+			Vector3.new(
+				root.Position.X
+					- previous.X,
+				0,
+				root.Position.Z
+					- previous.Z
+			).Magnitude
+
+		bot.lastStuckPosition =
+			root.Position
+
+		if targetDistance > 3.5
+			and moved < 0.45 then
+
+			bot.stuckCount =
+				(bot.stuckCount or 0)
+				+ 1
+		else
+			bot.stuckCount = 0
+		end
+
+		if bot.stuckCount >= 2 then
+			bot.stuckCount = 0
+
+			WeaponPackRuntime.forceBotJump(
+				bot
+			)
+
+			-- Force a real path around the obstruction.
+			WeaponPackRuntime.requestBotPath(
+				bot,
+				bot.lastMoveTarget,
+				true
+			)
+		end
+	end
+
+WeaponPackRuntime.smartBotMoveTo =
+	function(bot, targetPosition)
+		if not bot
+			or not bot.humanoid
+			or not targetPosition then
+
+			return
+		end
+
+		bot.lastMoveTarget =
+			targetPosition
+
+		WeaponPackRuntime.checkBotStuck(
+			bot
+		)
+
+		-- While a path task is already driving the Humanoid,
+		-- do NOT overwrite it with direct MoveTo every heartbeat.
+		if bot.pathActive then
+			-- If the desired target moved a lot, cancel and request
+			-- a fresh path to the new target.
+			if bot.pathTarget
+				and (
+					bot.pathTarget
+						- targetPosition
+				).Magnitude > 10 then
+
+				WeaponPackRuntime.cancelBotPath(
+					bot
+				)
+
+				WeaponPackRuntime.requestBotPath(
+					bot,
+					targetPosition,
+					true
+				)
+			end
+
+			return
+		end
+
+		local blocked =
+			WeaponPackRuntime.isDirectRouteBlocked(
+				bot,
+				targetPosition
+			)
+
+		if blocked then
+			WeaponPackRuntime.requestBotPath(
+				bot,
+				targetPosition,
+				false
+			)
+
+			return
+		end
+
+		-- Clear path: cheap direct movement.
+		bot.humanoid:MoveTo(
+			targetPosition
+		)
+	end
+
+local function startRoundSeek(bot)
+	task.spawn(function()
+		task.wait(
+			math.random(
+				ROUND_SEEK_DELAY_MIN * 10,
+				ROUND_SEEK_DELAY_MAX * 10
+			) / 10
+		)
+
+		while running
+			and bot.model
+			and bot.model.Parent
+			and bot.seekingPlayer do
+
+			local character =
+				player.Character
+
+			local playerRoot =
+				character
+				and character:FindFirstChild(
+					"HumanoidRootPart"
+				)
+
+			if not playerRoot then
+				task.wait(0.35)
+				continue
+			end
+
+			local distance =
+				(
+					bot.root.Position
+					- playerRoot.Position
+				).Magnitude
+
+			if distance
+				<= SEEK_FINISH_DISTANCE then
+
+				bot.seekingPlayer =
+					false
+
+				WeaponPackRuntime.cancelBotPath(
+					bot
+				)
+
+				chooseNewPosition(
+					bot
+				)
+
+				break
+			end
+
+			bot.humanoid.WalkSpeed =
+				RUN_SPEED
+
+			bot.lastMoveTarget =
+				playerRoot.Position
+
+			WeaponPackRuntime.requestBotPath(
+				bot,
+				playerRoot.Position,
+				false
+			)
+
+			WeaponPackRuntime.checkBotStuck(
+				bot
+			)
+
+			task.wait(0.30)
+		end
+	end)
+end
+
+local function scatterBotsForRound(playerRoot)
+	if roundScatterCooldown then
+		return
+	end
+
+	roundScatterCooldown = true
+
+	for _, bot in ipairs(bots) do
+		if bot.model and bot.model.Parent then
+			local randomPosition =
+				getRandomRoundGroundPosition(playerRoot)
+
+			bot.model:PivotTo(
+				CFrame.new(randomPosition)
+			)
+
+			bot.root.AssemblyLinearVelocity = Vector3.zero
+			bot.root.AssemblyAngularVelocity = Vector3.zero
+
+			WeaponPackRuntime.cancelBotPath(
+				bot
+			)
+
+			bot.seekingPlayer = true
+
+			bot.nextIdleMove =
+				time() +
+				math.random(
+					IDLE_MOVE_MIN,
+					IDLE_MOVE_MAX
+				)
+
+			startRoundSeek(bot)
+		end
+	end
+
+	task.delay(5, function()
+		roundScatterCooldown = false
+	end)
+end
+
+--------------------------------------------------
+-- BOT RANDOM LOADOUT
+-- Every bot gets BOTH:
+--   1 random gun
+--   1 random knife
+--------------------------------------------------
+
+WeaponPackRuntime.BOT_GUN_POOL = {}
+WeaponPackRuntime.BOT_KNIFE_POOL = {}
+
+for _, configuredWeapon in ipairs(
+	WEAPON_LIST
+) do
+	local weaponType =
+		WeaponPackRuntime.WEAPON_TYPE_HINTS[
+			configuredWeapon
+		]
+
+	if weaponType == "Gun" then
+		table.insert(
+			WeaponPackRuntime.BOT_GUN_POOL,
+			configuredWeapon
+		)
+
+	elseif weaponType == "Knife" then
+		table.insert(
+			WeaponPackRuntime.BOT_KNIFE_POOL,
+			configuredWeapon
+		)
+	end
+end
+
+WeaponPackRuntime.equipBotDualLoadout =
+	function(bot, keepExistingNames)
+		if not bot
+			or not bot.model
+			or not bot.model.Parent then
+
+			return
+		end
+
+		local gunName =
+			keepExistingNames
+			and bot.gunName
+			or nil
+
+		local knifeName =
+			keepExistingNames
+			and bot.knifeName
+			or nil
+
+		if not gunName
+			and #WeaponPackRuntime.BOT_GUN_POOL > 0 then
+
+			gunName =
+				WeaponPackRuntime.BOT_GUN_POOL[
+					math.random(
+						1,
+						#WeaponPackRuntime.BOT_GUN_POOL
+					)
+				]
+		end
+
+		if not knifeName
+			and #WeaponPackRuntime.BOT_KNIFE_POOL > 0 then
+
+			knifeName =
+				WeaponPackRuntime.BOT_KNIFE_POOL[
+					math.random(
+						1,
+						#WeaponPackRuntime.BOT_KNIFE_POOL
+					)
+				]
+		end
+
+		if gunName then
+			local gunSuccess =
+				holsterWeapon(
+					bot.model,
+					gunName,
+					"HolsteredGun"
+				)
+
+			if gunSuccess then
+				bot.gunName =
+					gunName
+			end
+		end
+
+		if knifeName then
+			local knifeSuccess =
+				holsterWeapon(
+					bot.model,
+					knifeName,
+					"HolsteredKnife"
+				)
+
+			if knifeSuccess then
+				bot.knifeName =
+					knifeName
+			end
+		end
+	end
+
+--------------------------------------------------
+-- CREATE BOT
+--------------------------------------------------
+
+local function createBot(number, forcedAvatar)
+
+	local character = player.Character
+	if not character then return end
+
+	local playerRoot =
+		character:FindFirstChild("HumanoidRootPart")
+
+	if not playerRoot then return end
+
+	if #BOT_AVATARS == 0 then
+		warn("No valid bot avatars were resolved. Add usernames or IDs to BOT_AVATAR_ENTRIES.")
+		return
+	end
+
+	local avatar
+
+	if forcedAvatar then
+		avatar = forcedAvatar
+	else
+		if #AVAILABLE_BOT_AVATARS == 0 then
+			warn("No unused bot avatars remain in the pool.")
+			return
+		end
+
+		-- Initial spawning uses the shuffled no-repeat pool.
+		avatar = table.remove(AVAILABLE_BOT_AVATARS)
+	end
+
+	local userId = avatar.userId
+	local username = avatar.username
+
+	local success, description =
+		pcall(function()
+			return Players:GetHumanoidDescriptionFromUserIdAsync(userId)
+		end)
+
+	if not success or not description then
+		warn("Could not load bot avatar:", userId)
+		return
+	end
+
+	local botModel =
+		Players:CreateHumanoidModelFromDescription(
+			description,
+			Enum.HumanoidRigType.R15
+		)
+
+	botModel.Name = username
+
+	botModel.Parent = workspace
+
+	-- Disable any default Animate script so it cannot override
+	-- the custom idle/walk animation tracks.
+	local defaultAnimate = botModel:FindFirstChild("Animate")
+	if defaultAnimate then
+		defaultAnimate.Disabled = true
+	end
+
+	local humanoid =
+		botModel:WaitForChild("Humanoid")
+
+	local root =
+		botModel:WaitForChild("HumanoidRootPart")
+
+	local head =
+		botModel:WaitForChild("Head")
+
+	humanoid.WalkSpeed =
+		WALK_SPEED
+
+	humanoid.AutoRotate = true
+
+	local botAnimations =
+		loadBotAnimations(botModel, humanoid)
+
+	--------------------------------------------------
+	-- NO COLLISION
+	--------------------------------------------------
+
+	for _, obj in ipairs(botModel:GetDescendants()) do
+		if obj:IsA("BasePart") then
+			obj.CanCollide = false
+			obj.CanTouch = false
+			obj.Massless = true
+		end
+	end
+
+	--------------------------------------------------
+	-- BOT DATA
+	--------------------------------------------------
+
+	local bot = {
+		model = botModel,
+		humanoid = humanoid,
+		root = root,
+		number = number,
+		userId = userId,
+		username = username,
+		sideOffset = 0,
+		backOffset = 8,
+		nextChange = 0,
+
+		-- Independent idle movement timer
+		nextIdleMove =
+			time() +
+			math.random(
+				IDLE_MOVE_MIN,
+				IDLE_MOVE_MAX
+			),
+
+		-- Each bot updates movement at a different time.
+		nextMoveUpdate =
+			time() +
+			math.random(
+				math.floor(MOVE_UPDATE_MIN * 100),
+				math.floor(MOVE_UPDATE_MAX * 100)
+			) / 100,
+
+		reactionDelay =
+			math.random(
+				math.floor(REACTION_DELAY_MIN * 100),
+				math.floor(REACTION_DELAY_MAX * 100)
+			) / 100,
+
+		followDeadzone =
+			math.random(
+				math.floor(FOLLOW_DEADZONE_MIN * 10),
+				math.floor(FOLLOW_DEADZONE_MAX * 10)
+			) / 10,
+
+		personalDriftX =
+			math.random(
+				-math.floor(PERSONAL_OFFSET_DRIFT * 10),
+				 math.floor(PERSONAL_OFFSET_DRIFT * 10)
+			) / 10,
+
+		personalDriftZ =
+			math.random(
+				-math.floor(PERSONAL_OFFSET_DRIFT * 10),
+				 math.floor(PERSONAL_OFFSET_DRIFT * 10)
+			) / 10,
+
+		pauseUntil = 0,
+		lastPlayerPosition = playerRoot.Position,
+
+		nextRandomJump =
+			time() +
+			math.random(
+				RANDOM_JUMP_MIN_INTERVAL,
+				RANDOM_JUMP_MAX_INTERVAL
+			),
+
+		-- Obstacle-jump / stuck recovery state
+		nextObstacleCheck = 0,
+		nextObstacleJump = 0,
+		nextStuckCheck =
+			time() + 0.70,
+		lastStuckPosition =
+			root.Position,
+		stuckCount = 0,
+		obstacleSide =
+			math.random() < 0.5
+			and -1
+			or 1,
+		lastMoveTarget = nil,
+
+		-- Smart pathfinding state
+		pathActive = false,
+		pathBusy = false,
+		pathTarget = nil,
+		pathGeneration = 0,
+		nextPathRequest = 0,
+
+		-- Each bot keeps one of each weapon category.
+		gunName = nil,
+		knifeName = nil,
+
+		animations = botAnimations,
+
+		text = nil,
+		seekingPlayer = false,
+	}
+
+	chooseNewPosition(bot)
+
+	--------------------------------------------------
+	-- ANIMATION STATE FROM HUMANOID RUNNING EVENT
+	--------------------------------------------------
+
+	bot.runningConnection =
+		humanoid.Running:Connect(function(speed)
+
+			if not bot.model or not bot.model.Parent then
+				return
+			end
+
+			if speed > 0.5 then
+				playBotWalk(bot)
+
+				-- Sync leg speed to actual movement speed.
+				if bot.animations
+					and bot.animations.walk then
+
+					local animSpeed =
+						math.clamp(
+							speed / WALK_SPEED,
+							0.75,
+							1.45
+						)
+
+					bot.animations.walk:AdjustSpeed(
+						animSpeed
+					)
+				end
+
+			else
+				playBotIdle(bot)
+			end
+		end)
+
+	--------------------------------------------------
+	-- STARTING POSITION
+	--------------------------------------------------
+
+	local startPosition =
+		playerRoot.Position
+		+ playerRoot.CFrame.RightVector
+			* bot.sideOffset
+		- playerRoot.CFrame.LookVector
+			* bot.backOffset
+
+	botModel:PivotTo(
+		CFrame.new(startPosition)
+	)
+
+	--------------------------------------------------
+	-- REALISTIC ROBLOX-STYLE CHAT UI
+	--------------------------------------------------
+
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "BotChat"
+	billboard.Size = UDim2.fromOffset(220, 50)
+	billboard.StudsOffset = Vector3.new(0, 2.15, 0)
+	billboard.AlwaysOnTop = false
+	billboard.MaxDistance = 100
+	billboard.LightInfluence = 0
+	billboard.Enabled = false
+	billboard.Parent = head
+
+	local holder = Instance.new("Frame")
+	holder.Name = "Holder"
+	holder.Size = UDim2.fromScale(1, 1)
+	holder.BackgroundTransparency = 1
+	holder.Parent = billboard
+
+	local bubble = Instance.new("Frame")
+	bubble.Name = "Bubble"
+	bubble.AnchorPoint = Vector2.new(0.5, 0.5)
+	bubble.Position = UDim2.new(0.5, 0, 0.40, 0)
+	bubble.Size = UDim2.fromOffset(58, 32)
+	bubble.BackgroundColor3 = Color3.fromRGB(248, 248, 248)
+	bubble.BackgroundTransparency = 0.0
+	bubble.BorderSizePixel = 0
+	bubble.Parent = holder
+
+	local bubbleCorner = Instance.new("UICorner")
+	bubbleCorner.CornerRadius = UDim.new(0, 16)
+	bubbleCorner.Parent = bubble
+
+	local bubbleStroke = Instance.new("UIStroke")
+	bubbleStroke.Color = Color3.fromRGB(238, 238, 238)
+	bubbleStroke.Transparency = 0.78
+	bubbleStroke.Thickness = 0.6
+	bubbleStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	bubbleStroke.Parent = bubble
+
+
+	-- Small downward pointer like the Roblox bubble.
+	local tail = Instance.new("Frame")
+	tail.Name = "Tail"
+	tail.AnchorPoint = Vector2.new(0.5, 0.5)
+	tail.Position = UDim2.new(0.5, 0, 1, -3)
+	tail.Size = UDim2.fromOffset(7, 7)
+	tail.Rotation = 45
+	tail.BackgroundColor3 = bubble.BackgroundColor3
+	tail.BackgroundTransparency = bubble.BackgroundTransparency
+	tail.BorderSizePixel = 0
+	tail.ZIndex = 0
+	tail.Parent = bubble
+
+	local tailCorner = Instance.new("UICorner")
+	tailCorner.CornerRadius = UDim.new(0, 2)
+	tailCorner.Parent = tail
+
+	local text = Instance.new("TextLabel")
+	text.Name = "Message"
+	text.AnchorPoint = Vector2.new(0.5, 0.5)
+	text.Position = UDim2.fromScale(0.5, 0.5)
+	text.Size = UDim2.new(1, -18, 1, -6)
+	text.BackgroundTransparency = 1
+	text.TextColor3 = Color3.fromRGB(68, 68, 68)
+	text.TextTransparency = 0
+	text.TextSize = 16
+	text.FontFace = Font.new(
+		"rbxasset://fonts/families/BuilderSans.json",
+		Enum.FontWeight.Medium,
+		Enum.FontStyle.Normal
+	)
+	text.TextWrapped = false
+	text.TextScaled = false
+	text.TextXAlignment = Enum.TextXAlignment.Center
+	text.TextYAlignment = Enum.TextYAlignment.Center
+	text.Text = ""
+	text.ZIndex = 2
+	text.Parent = bubble
+
+	bot.text = text
+	bot.chatBillboard = billboard
+	bot.chatBubble = bubble
+	bot.chatTail = tail
+	bot.chatSerial = 0
+
+	local function hideChatBubble(immediate)
+		if not billboard.Parent then
+			return
+		end
+
+		if immediate then
+			billboard.Enabled = false
+			text.Text = ""
+			text.TextTransparency = 0
+			bubble.BackgroundTransparency = 0.0
+			tail.BackgroundTransparency = 0.0
+			bubbleStroke.Transparency = 0.78
+			return
+		end
+
+		local fadeInfo = TweenInfo.new(
+			0.15,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.Out
+		)
+
+		TweenService:Create(text, fadeInfo, {
+			TextTransparency = 1
+		}):Play()
+
+		TweenService:Create(bubble, fadeInfo, {
+			BackgroundTransparency = 1
+		}):Play()
+
+		TweenService:Create(tail, fadeInfo, {
+			BackgroundTransparency = 1
+		}):Play()
+
+		TweenService:Create(bubbleStroke, fadeInfo, {
+			Transparency = 1
+		}):Play()
+
+		task.wait(0.16)
+
+		if billboard.Parent then
+			billboard.Enabled = false
+			text.Text = ""
+			text.TextTransparency = 0
+			bubble.BackgroundTransparency = 0.0
+			tail.BackgroundTransparency = 0.0
+			bubbleStroke.Transparency = 0.78
+		end
+	end
+
+	local function showChatMessage(message)
+		if not message or not message:match("%S") then
+			hideChatBubble(true)
+			return
+		end
+
+		bot.chatSerial += 1
+		local serial = bot.chatSerial
+
+		local params = Instance.new("GetTextBoundsParams")
+		params.Text = message
+		params.Font = text.FontFace
+		params.Size = 16
+		params.Width = 190
+
+		local successBounds, bounds = pcall(function()
+			return TextService:GetTextBoundsAsync(params)
+		end)
+
+		local textWidth
+		if successBounds and bounds then
+			textWidth = bounds.X
+		else
+			-- Safe fallback if text bounds are unavailable.
+			textWidth = #message * 8
+		end
+
+		local width = math.clamp(textWidth + 24, 48, 205)
+
+		local finalSize = UDim2.fromOffset(width, 32)
+		local finalPosition = UDim2.new(0.5, 0, 0.40, 0)
+
+		text.Text = message
+
+		-- Start slightly smaller, lower, and transparent.
+		bubble.Size = UDim2.fromOffset(
+			math.max(30, math.floor(width * 0.90)),
+			29
+		)
+		bubble.Position = UDim2.new(0.5, 0, 0.44, 0)
+
+		text.TextTransparency = 1
+		bubble.BackgroundTransparency = 1
+		tail.BackgroundTransparency = 1
+		bubbleStroke.Transparency = 1
+		billboard.Enabled = true
+
+		-- Smooth Roblox-style pop-up.
+		local popInfo = TweenInfo.new(
+			0.24,
+			Enum.EasingStyle.Quint,
+			Enum.EasingDirection.Out
+		)
+
+		TweenService:Create(bubble, popInfo, {
+			Size = finalSize,
+			Position = finalPosition,
+			BackgroundTransparency = 0.03
+		}):Play()
+
+		TweenService:Create(text, TweenInfo.new(
+			0.20,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.Out
+		), {
+			TextTransparency = 0
+		}):Play()
+
+		TweenService:Create(tail, TweenInfo.new(
+			0.20,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.Out
+		), {
+			BackgroundTransparency = 0.03
+		}):Play()
+
+		TweenService:Create(bubbleStroke, TweenInfo.new(
+			0.20,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.Out
+		), {
+			Transparency = 0.35
+		}):Play()
+
+		-- Keep each message visible for 15 seconds.
+		task.delay(15, function()
+			if botModel.Parent
+				and bot.chatSerial == serial
+				and billboard.Enabled then
+
+				hideChatBubble(false)
+			end
+		end)
+	end
+
+	bot.showChatMessage = showChatMessage
+	bot.hideChatBubble = hideChatBubble
+
+	table.insert(bots, bot)
+
+	-- Start with this bot's own idle style.
+	playBotIdle(bot)
+
+	-- Give every bot BOTH a gun and a knife.
+	task.delay(0.35, function()
+		if bot.model
+			and bot.model.Parent then
+
+			WeaponPackRuntime.equipBotDualLoadout(
+				bot,
+				false
+			)
+		end
+	end)
+
+	--------------------------------------------------
+	-- RANDOM CHAT
+	--------------------------------------------------
+
+	task.spawn(function()
+
+		while botModel.Parent do
+
+			task.wait(
+				math.random(3, 8)
+			)
+
+			if not botModel.Parent then
+				break
+			end
+
+			if chatEnabled then
+
+				local message =
+					messages[
+						math.random(
+							1,
+							#messages
+						)
+					]
+
+				showChatMessage(message)
+
+				-- Don't replace the message before its 15 seconds finish.
+				task.wait(15)
+
+			else
+				hideChatBubble(true)
+			end
+
+		end
+
+	end)
+end
+
+--------------------------------------------------
+-- REMOVE BOTS
+--------------------------------------------------
+
+local function removeBots()
+
+	for _, bot in ipairs(bots) do
+
+		if bot.runningConnection then
+			bot.runningConnection:Disconnect()
+			bot.runningConnection = nil
+		end
+
+		if bot.model
+			and bot.model.Parent then
+
+			bot.model:Destroy()
+
+		end
+
+	end
+
+	table.clear(bots)
+
+end
+
+--------------------------------------------------
+-- ONE-BOT ROTATION
+--------------------------------------------------
+
+local function getUnusedReplacementAvatar(excludedUserId)
+	local activeIds = {}
+
+	for _, bot in ipairs(bots) do
+		if bot.userId then
+			activeIds[bot.userId] = true
+		end
+	end
+
+	local choices = {}
+
+	for _, avatar in ipairs(BOT_AVATARS) do
+		if not activeIds[avatar.userId]
+			and avatar.userId ~= excludedUserId then
+
+			table.insert(choices, avatar)
+		end
+	end
+
+	if #choices == 0 then
+		return nil
+	end
+
+	return choices[math.random(1, #choices)]
+end
+
+local function removeSingleBot(index)
+	local bot = bots[index]
+
+	if not bot then
+		return nil
+	end
+
+	if bot.runningConnection then
+		bot.runningConnection:Disconnect()
+		bot.runningConnection = nil
+	end
+
+	if bot.model and bot.model.Parent then
+		bot.model:Destroy()
+	end
+
+	table.remove(bots, index)
+
+	return bot
+end
+
+local function rotateOneBot()
+	if not running or #bots == 0 then
+		return
+	end
+
+	-- Pick exactly ONE currently spawned bot.
+	local index = math.random(1, #bots)
+	local oldBot = bots[index]
+
+	if not oldBot then
+		return
+	end
+
+	-- Find a different avatar that is not currently active.
+	local replacement =
+		getUnusedReplacementAvatar(oldBot.userId)
+
+	if not replacement then
+		warn("No unused avatar is available for bot rotation.")
+		return
+	end
+
+	local botNumber = oldBot.number
+
+	removeSingleBot(index)
+
+	-- Small natural gap between one bot leaving and the new one joining.
+	task.wait(math.random(8, 20) / 10)
+
+	if running then
+		createBot(botNumber, replacement)
+	end
+end
+
+local function startBotRotation()
+	rotationGeneration += 1
+	local myGeneration = rotationGeneration
+
+	task.spawn(function()
+		while running
+			and rotationGeneration == myGeneration do
+
+			task.wait(BOT_ROTATION_INTERVAL)
+
+			if not running
+				or rotationGeneration ~= myGeneration then
+				break
+			end
+
+			-- Only ONE bot is replaced on each interval.
+			rotateOneBot()
+		end
+	end)
+end
+
+--------------------------------------------------
+-- START
+--------------------------------------------------
+
+local function startBots()
+
+	if running then
+		return
+	end
+
+	resetAvailableAvatarPool()
+
+	if botCount > #BOT_AVATARS then
+		botCount = #BOT_AVATARS
+		updateLabels()
+	end
+
+	running = true
+
+	status.Text =
+		"● RUNNING"
+
+	status.TextColor3 =
+		Color3.fromRGB(80, 255, 120)
+
+	local character =
+		player.Character or
+		player.CharacterAdded:Wait()
+
+	local startRoot = character:WaitForChild(
+		"HumanoidRootPart"
+	)
+
+	lastPlayerPosition = startRoot.Position
+
+	for i = 1, botCount do
+
+		createBot(i)
+
+		task.wait(0.2)
+
+	end
+
+	startBotRotation()
+
+end
+
+--------------------------------------------------
+-- STOP
+--------------------------------------------------
+
+local function stopBots()
+
+	running = false
+	rotationGeneration += 1
+	lastPlayerPosition = nil
+
+	removeBots()
+
+	status.Text =
+		"● STOPPED"
+
+	status.TextColor3 =
+		Color3.fromRGB(255, 80, 80)
+
+end
+
+--------------------------------------------------
+-- FOLLOW + IDLE MOVEMENT SYSTEM
+--------------------------------------------------
+
+RunService.Heartbeat:Connect(function()
+
+	if not running then
+		return
+	end
+
+	local character =
+		player.Character
+
+	if not character then
+		return
+	end
+
+	local playerRoot =
+		character:FindFirstChild(
+			"HumanoidRootPart"
+		)
+
+	if not playerRoot then
+		return
+	end
+
+	--------------------------------------------------
+	-- DETECT ROUND / MAP TELEPORT
+	--------------------------------------------------
+
+	if lastPlayerPosition then
+		local movedDistance =
+			(playerRoot.Position - lastPlayerPosition).Magnitude
+
+		if movedDistance >= ROUND_TELEPORT_DETECT_DISTANCE then
+			scatterBotsForRound(playerRoot)
+
+			if selectedWeaponName then
+				WeaponPackRuntime.forceRoundWeaponReequip(
+					character,
+					"bot round detector"
+				)
+			end
+		end
+	end
+
+	lastPlayerPosition = playerRoot.Position
+
+	local playerHumanoid =
+		character:FindFirstChildOfClass(
+			"Humanoid"
+		)
+
+	if not playerHumanoid then
+		return
+	end
+
+	--------------------------------------------------
+	-- CHECK IF PLAYER IS MOVING
+	--------------------------------------------------
+
+	local playerMoving =
+		playerHumanoid.MoveDirection.Magnitude > 0.05
+
+	for _, bot in ipairs(bots) do
+
+		if not bot.model.Parent then
+			continue
+		end
+
+		local root =
+			bot.root
+
+		local humanoid =
+			bot.humanoid
+
+		--------------------------------------------------
+		-- RANDOM INDEPENDENT JUMPS
+		--------------------------------------------------
+
+		if time() >= bot.nextRandomJump then
+			bot.nextRandomJump =
+				time() +
+				math.random(
+					RANDOM_JUMP_MIN_INTERVAL,
+					RANDOM_JUMP_MAX_INTERVAL
+				)
+
+			if math.random() < RANDOM_JUMP_CHANCE then
+				local state = humanoid:GetState()
+
+				if state ~= Enum.HumanoidStateType.Freefall
+					and state ~= Enum.HumanoidStateType.Jumping
+					and humanoid.FloorMaterial ~= Enum.Material.Air then
+
+					humanoid.Jump = true
+				end
+			end
+		end
+
+		-- Check the path directly in front of the bot while it is
+		-- already moving, including during round-start pathfinding.
+		WeaponPackRuntime.checkBotStuck(
+			bot
+		)
+
+		-- During a round-start seek, pathfinding controls the bot.
+		if bot.seekingPlayer then
+			continue
+		end
+
+		-- Random short pauses make bots feel less robotic.
+		if time() < bot.pauseUntil then
+			WeaponPackRuntime.cancelBotPath(
+				bot
+			)
+
+			playBotIdle(bot)
+			continue
+		end
+
+		-- Every bot reacts on its own schedule instead of every frame.
+		if time() < bot.nextMoveUpdate then
+			continue
+		end
+
+		bot.nextMoveUpdate =
+			time() +
+			math.random(
+				math.floor(MOVE_UPDATE_MIN * 100),
+				math.floor(MOVE_UPDATE_MAX * 100)
+			) / 100
+
+		if math.random() < RANDOM_PAUSE_CHANCE then
+			bot.pauseUntil =
+				time() +
+				math.random(
+					math.floor(RANDOM_PAUSE_MIN * 100),
+					math.floor(RANDOM_PAUSE_MAX * 100)
+				) / 100
+			continue
+		end
+
+		--------------------------------------------------
+		-- DISTANCE FROM PLAYER
+		--------------------------------------------------
+
+		local playerDistance =
+			(root.Position -
+				playerRoot.Position).Magnitude
+
+		--------------------------------------------------
+		-- VERY FAR AWAY
+		-- Do NOT teleport. Let the bot catch up naturally.
+		--------------------------------------------------
+
+		if playerDistance > CATCHUP_DISTANCE * 2 then
+			humanoid.WalkSpeed = RUN_SPEED
+
+			local catchupTarget =
+				playerRoot.Position
+				+ playerRoot.CFrame.RightVector
+					* bot.sideOffset
+				- playerRoot.CFrame.LookVector
+					* bot.backOffset
+
+			WeaponPackRuntime.smartBotMoveTo(bot, catchupTarget)
+			playBotWalk(bot)
+
+			continue
+		end
+
+		--------------------------------------------------
+		-- PLAYER MOVING
+		-- NORMAL FOLLOWING
+		--------------------------------------------------
+
+		if playerMoving then
+
+			if time() >= bot.nextChange then
+				chooseNewPosition(bot)
+			end
+
+			-- Each bot reacts to a slightly delayed version of
+			-- the player's position instead of snapping instantly.
+			if
+				(playerRoot.Position - bot.lastPlayerPosition).Magnitude > 1
+			then
+				task.delay(bot.reactionDelay, function()
+					if bot.model and bot.model.Parent then
+						bot.lastPlayerPosition = playerRoot.Position
+					end
+				end)
+			end
+
+			local delayedPosition = bot.lastPlayerPosition
+
+			local target =
+				delayedPosition
+				+ playerRoot.CFrame.RightVector
+					* bot.sideOffset
+				- playerRoot.CFrame.LookVector
+					* bot.backOffset
+
+			local targetDistance =
+				(root.Position -
+					target).Magnitude
+
+			--------------------------------------------------
+			-- FAR BEHIND
+			--------------------------------------------------
+
+			if playerDistance >
+				CATCHUP_DISTANCE then
+
+				humanoid.WalkSpeed =
+					RUN_SPEED
+
+				WeaponPackRuntime.smartBotMoveTo(
+					bot,
+					target
+				)
+
+			--------------------------------------------------
+			-- NORMAL FOLLOW
+			--------------------------------------------------
+
+			elseif targetDistance > bot.followDeadzone then
+
+				humanoid.WalkSpeed =
+					WALK_SPEED
+
+				WeaponPackRuntime.smartBotMoveTo(
+					bot,
+					target
+				)
+
+			else
+
+				WeaponPackRuntime.cancelBotPath(
+					bot
+				)
+
+				WeaponPackRuntime.smartBotMoveTo(
+					bot,
+					root.Position
+				)
+
+			end
+
+		--------------------------------------------------
+		-- PLAYER STANDING STILL
+		--------------------------------------------------
+
+		else
+
+			--------------------------------------------------
+			-- TOO FAR FROM PLAYER
+			-- MOVE BACK TOWARD PLAYER
+			--------------------------------------------------
+
+			if playerDistance >
+				followDistance + 7 then
+
+				local target =
+					playerRoot.Position
+					+ playerRoot.CFrame.RightVector
+						* bot.sideOffset
+					- playerRoot.CFrame.LookVector
+						* bot.backOffset
+
+				humanoid.WalkSpeed =
+					WALK_SPEED
+
+				WeaponPackRuntime.smartBotMoveTo(
+					bot,
+					target
+				)
+
+			--------------------------------------------------
+			-- SMALL IDLE WANDER
+			--------------------------------------------------
+
+			elseif time() >= bot.nextIdleMove then
+
+				--------------------------------------------------
+				-- PICK A SMALL RANDOM DIRECTION
+				--------------------------------------------------
+
+				local angle =
+					math.rad(
+						math.random(0, 360)
+					)
+
+				local distance =
+					math.random(
+						10,
+						(IDLE_WANDER_DISTANCE + 3) * 10
+					) / 10
+
+				local idleOffset =
+					Vector3.new(
+						math.cos(angle) * distance,
+						0,
+						math.sin(angle) * distance
+					)
+
+				local idleTarget =
+					root.Position +
+					idleOffset
+
+				--------------------------------------------------
+				-- MAKE SURE THEY DON'T WANDER TOO FAR
+				--------------------------------------------------
+
+				local distanceAfterMove =
+					(idleTarget -
+						playerRoot.Position).Magnitude
+
+				if distanceAfterMove >
+					followDistance + 6 then
+
+					local direction =
+						(
+							playerRoot.Position -
+							root.Position
+						).Unit
+
+					idleTarget =
+						root.Position +
+						direction * 2
+
+				end
+
+				humanoid.WalkSpeed =
+					WALK_SPEED
+
+				WeaponPackRuntime.smartBotMoveTo(
+					bot,
+					idleTarget
+				)
+
+				--------------------------------------------------
+				-- DIFFERENT TIME FOR EVERY BOT
+				--------------------------------------------------
+
+				bot.nextIdleMove =
+					time() +
+					math.random(
+						IDLE_MOVE_MIN * 10,
+						IDLE_MOVE_MAX * 10
+					) / 10
+
+			end
+
+		end
+
+	end
+
+end)
+
+--------------------------------------------------
+-- BOT CONTROLS
+--------------------------------------------------
+
+startButton.MouseButton1Click:Connect(function()
+	startBots()
+end)
+
+stopButton.MouseButton1Click:Connect(function()
+	stopBots()
+end)
+
+chatButton.MouseButton1Click:Connect(function()
+
+	chatEnabled = not chatEnabled
+
+	updateLabels()
+
+	if not chatEnabled then
+
+		for _, bot in ipairs(bots) do
+
+			if bot.hideChatBubble then
+				bot.chatSerial += 1
+				bot.hideChatBubble(true)
+			elseif bot.text then
+				bot.text.Text = ""
+				bot.text.Visible = false
+			end
+
+		end
+
+	end
+
+end)
+
+--------------------------------------------------
+-- BOT COUNT BUTTONS
+--------------------------------------------------
+
+minusBots.MouseButton1Click:Connect(function()
+
+	botCount =
+		math.max(1, botCount - 1)
+
+	updateLabels()
+
+end)
+
+plusBots.MouseButton1Click:Connect(function()
+
+	botCount =
+		math.min(20, botCount + 1)
+
+	updateLabels()
+
+end)
+
+--------------------------------------------------
+-- DISTANCE BUTTONS
+--------------------------------------------------
+
+minusDistance.MouseButton1Click:Connect(function()
+
+	followDistance =
+		math.max(3, followDistance - 1)
+
+	MIN_DISTANCE =
+		math.max(3, followDistance - 3)
+
+	MAX_DISTANCE =
+		followDistance + 5
+
+	updateLabels()
+
+end)
+
+plusDistance.MouseButton1Click:Connect(function()
+
+	followDistance =
+		math.min(25, followDistance + 1)
+
+	MIN_DISTANCE =
+		math.max(3, followDistance - 3)
+
+	MAX_DISTANCE =
+		followDistance + 5
+
+	updateLabels()
+
+end)
+
+--------------------------------------------------
+-- RESPAWN / ROUND END
+-- Keep the SAME bots instead of recreating them.
+--------------------------------------------------
+
+player.CharacterAdded:Connect(function(character)
+
+	if running then
+
+		local newRoot =
+			character:WaitForChild("HumanoidRootPart")
+
+		task.wait(1)
+
+		lastPlayerPosition = newRoot.Position
+
+		for _, bot in ipairs(bots) do
+
+			if bot.model
+				and bot.model.Parent
+				and bot.root
+				and bot.root.Parent then
+
+				-- Keep the exact same bot/avatar.
+				bot.seekingPlayer = false
+
+				chooseNewPosition(bot)
+
+				local target =
+					newRoot.Position
+					+ newRoot.CFrame.RightVector
+						* bot.sideOffset
+					- newRoot.CFrame.LookVector
+						* bot.backOffset
+
+				bot.model:PivotTo(
+					CFrame.new(target)
+				)
+
+				bot.root.AssemblyLinearVelocity =
+					Vector3.zero
+
+				bot.root.AssemblyAngularVelocity =
+					Vector3.zero
+
+				bot.nextIdleMove =
+					time() +
+					math.random(
+						IDLE_MOVE_MIN,
+						IDLE_MOVE_MAX
+					)
+
+				bot.nextRandomJump =
+					time() +
+					math.random(
+						RANDOM_JUMP_MIN_INTERVAL,
+						RANDOM_JUMP_MAX_INTERVAL
+					)
+
+				bot.nextObstacleCheck = 0
+				bot.nextObstacleJump = 0
+				bot.nextStuckCheck =
+					time() + 0.70
+				bot.lastStuckPosition =
+					bot.root.Position
+				bot.stuckCount = 0
+				bot.lastMoveTarget = nil
+
+				WeaponPackRuntime.cancelBotPath(
+					bot
+				)
+
+				bot.pathTarget = nil
+				bot.nextPathRequest = 0
+
+				-- New player character = new MM2 belt/back attachments.
+				-- Re-copy them and put the bot's SAME gun + knife back.
+				WeaponPackRuntime.syncBotWeaponAttachments(
+					bot.model
+				)
+
+				WeaponPackRuntime.equipBotDualLoadout(
+					bot,
+					true
+				)
+
+				playBotIdle(bot)
+			end
+		end
+
+	end
+
+end)
