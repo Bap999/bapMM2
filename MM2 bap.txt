@@ -64,8 +64,8 @@ local RANDOM_JUMP_CHANCE = 0.035
 local RANDOM_JUMP_MIN_INTERVAL = 3
 local RANDOM_JUMP_MAX_INTERVAL = 8
 
--- Replace ONE bot every 8 minutes
-local BOT_ROTATION_INTERVAL = 8 * 60
+-- Replace TWO bots every 5 minutes, one by one
+local BOT_ROTATION_INTERVAL = 5 * 60
 
 --------------------------------------------------
 -- BOT ANIMATION STYLES
@@ -365,6 +365,9 @@ local running = false
 local lastPlayerPosition = nil
 local roundScatterCooldown = false
 local rotationGeneration = 0
+-- selectedWeaponName remains the LAST slot the user changed.
+-- Gun/knife slot state is stored on WeaponPackRuntime to avoid Luau's
+-- 200 top-level local-variable limit in this already-large script.
 local selectedWeaponName = nil
 local availableWeaponNames = {}
 
@@ -375,6 +378,104 @@ local availableWeaponNames = {}
 --------------------------------------------------
 
 WeaponPackRuntime = WeaponPackRuntime or {}
+
+WeaponPackRuntime.selectedGunName = nil
+WeaponPackRuntime.selectedKnifeName = nil
+
+--------------------------------------------------
+-- WEAPON RUNTIME RESET FOR A NEW SCRIPT EXECUTION
+--------------------------------------------------
+-- WeaponPackRuntime is global in executor sessions. Old test builds can
+-- leave a bad saved Gingerscope pose behind, so never inherit positional
+-- state from a previous execution.
+WeaponPackRuntime.persistentGunFallbackLocalCFrame = nil
+WeaponPackRuntime.persistentGunFallbackPoseWeapon = nil
+WeaponPackRuntime.persistentGunFallbackUsesRootLock = false
+WeaponPackRuntime.persistentGunFallback = nil
+WeaponPackRuntime.persistentGunFallbackCharacter = nil
+WeaponPackRuntime.persistentGunFallbackWeapon = nil
+WeaponPackRuntime.lastGunBeltLocalCFrame = nil
+WeaponPackRuntime.currentReplacementPart = nil
+WeaponPackRuntime.currentReplacementWeaponName = nil
+WeaponPackRuntime.currentReplacementCharacter = nil
+WeaponPackRuntime.gingerscopeNativeAccessory = nil
+WeaponPackRuntime.gingerscopeNativeCharacter = nil
+
+-- Clear script-owned weapon visuals left by an earlier build in this session.
+if player.Character then
+	for _, child in ipairs(player.Character:GetChildren()) do
+		if child.Name == "HolsteredWeapon"
+			or child.Name == "HolsteredGun"
+			or child.Name == "HolsteredKnife"
+			or child.Name == "PersistentGingerscopeAccessory"
+			or child:GetAttribute("ScriptOwnedWeapon") == true
+			or child:GetAttribute("BotControllerNativeGingerscope") == true then
+
+			pcall(function()
+				child:Destroy()
+			end)
+		end
+	end
+end
+
+-- Remove any native Gingerscope accessory left by an older build.
+if player.Character then
+	for _, child in ipairs(player.Character:GetChildren()) do
+		if child.Name == "PersistentGingerscopeAccessory"
+			or child:GetAttribute("BotControllerNativeGingerscope") == true then
+			pcall(function()
+				child:Destroy()
+			end)
+		end
+	end
+end
+
+-- Remove stale Gingerscope workspace copies left by older attempts.
+local stalePersistentFolder =
+	workspace:FindFirstChild(
+		"SlaveControllerPersistentVisuals"
+	)
+
+if stalePersistentFolder then
+	for _, child in ipairs(
+		stalePersistentFolder:GetChildren()
+	) do
+		if child.Name == "PersistentGingerscopeAccessory"
+			or child:GetAttribute(
+				"BotControllerNativeGingerscope"
+			) == true then
+
+			pcall(function()
+				child:Destroy()
+			end)
+		end
+	end
+end
+
+-- Remove persistent visual folders left by older attempts.
+for _, folderName in ipairs({
+	"SlaveControllerVisuals",
+	"SlaveControllerPersistentVisuals",
+}) do
+	local oldFolder = workspace:FindFirstChild(folderName)
+	if oldFolder then
+		pcall(function()
+			oldFolder:Destroy()
+		end)
+	end
+end
+
+-- Remove the named render bindings used by previous Gingerscope builds.
+pcall(function()
+	RunService:UnbindFromRenderStep(
+		"BotControllerGingerscopeHostMask"
+	)
+end)
+pcall(function()
+	RunService:UnbindFromRenderStep(
+		"BotControllerGingerscopePoseLock"
+	)
+end)
 
 --------------------------------------------------
 -- ONE SLICE FONT - SAFE / NON-BLOCKING
@@ -588,6 +689,7 @@ WeaponPackRuntime.startOneSliceForGui =
 
 local WEAPON_LIST = {
 	"Harvester",
+	"Gingerscope",
 	"Icepiercer",
 	"Snowcannon",
 	"Flowerwood Gun",
@@ -609,8 +711,14 @@ local WEAPON_LIST = {
 	"Celestial",
 }
 
+WeaponPackRuntime.PLAYER_WEAPON_EQUIP_DISABLED = {
+	["Harvester"] = true,
+	["Icepiercer"] = true,
+}
+
 local WEAPON_ALIASES = {
 	["Harvester"] = {"Harvester"},
+	["Gingerscope"] = {"Gingerscope", "Ginger Scope"},
 	["Icepiercer"] = {"Icepiercer", "Ice Piercer"},
 	["Snowcannon"] = {"Snowcannon", "Snow Cannon"},
 	["Flowerwood Gun"] = {"Flowerwood Gun", "FlowerwoodGun"},
@@ -634,6 +742,7 @@ local WEAPON_ALIASES = {
 
 WeaponPackRuntime.WEAPON_TYPE_HINTS = {
 	["Harvester"] = "Gun",
+	["Gingerscope"] = "Gun",
 	["Icepiercer"] = "Gun",
 	["Snowcannon"] = "Gun",
 	["Flowerwood Gun"] = "Gun",
@@ -656,6 +765,7 @@ WeaponPackRuntime.WEAPON_TYPE_HINTS = {
 }
 
 WeaponPackRuntime.WEAPON_YEAR_HINTS = {
+	["Gingerscope"] = 2023,
 	["Icepiercer"] = 2022,
 	["Snowcannon"] = 2025,
 	["Flowerwood Gun"] = 2024,
@@ -975,6 +1085,15 @@ end
 
 WeaponPackRuntime.RUNTIME_WEAPON_VISUAL_CACHE =
 	WeaponPackRuntime.RUNTIME_WEAPON_VISUAL_CACHE or {}
+
+-- Last-resort visual sources for weapons whose mesh data is not exposed
+-- by the current MM2 client. Gingerscope first tries MM2's own data;
+-- this catalog asset is only used if those exact-runtime searches fail.
+WeaponPackRuntime.CATALOG_VISUAL_ASSETS =
+	WeaponPackRuntime.CATALOG_VISUAL_ASSETS
+	or {
+		["Gingerscope"] = "rbxassetid://97550774411667",
+	}
 
 WeaponPackRuntime.SYNC_MATCH_CACHE =
 	WeaponPackRuntime.SYNC_MATCH_CACHE or {}
@@ -2117,11 +2236,845 @@ function WeaponPackRuntime.searchReplicatedStorage(
 	return nil
 end
 
+function WeaponPackRuntime.loadCatalogWeaponVisual(
+	wantedName
+)
+	local asset =
+		WeaponPackRuntime.CATALOG_VISUAL_ASSETS[
+			wantedName
+		]
+
+	if not asset then
+		return nil
+	end
+
+	local ok, objects =
+		pcall(function()
+			return game:GetObjects(asset)
+		end)
+
+	if not ok
+		or type(objects) ~= "table" then
+
+		return nil
+	end
+
+	local expectedType =
+		WeaponPackRuntime.WEAPON_TYPE_HINTS[
+			wantedName
+		]
+		or "Gun"
+
+	local foundVisual = nil
+
+	for _, object in ipairs(objects) do
+		local candidate = object
+
+		if object:IsA("Accessory") then
+			candidate =
+				object:FindFirstChild("Handle")
+				or object:FindFirstChildWhichIsA(
+					"BasePart",
+					true
+				)
+		end
+
+		local visual =
+			WeaponPackRuntime.extractInstanceVisual(
+				candidate,
+				expectedType
+			)
+
+		if visual then
+			visual.Type = expectedType
+			visual.Placement =
+				expectedType == "Gun"
+				and "WaistRight"
+				or "WaistLeft"
+			visual.Source =
+				"catalog visual fallback"
+
+			foundVisual = visual
+		end
+
+		pcall(function()
+			object:Destroy()
+		end)
+
+		if foundVisual then
+			break
+		end
+	end
+
+	return foundVisual
+end
+
+
+--------------------------------------------------
+-- NATIVE GINGERSCOPE ACCESSORY
+--
+-- The catalog fallback is a real Roblox WAIST ACCESSORY.
+-- Previous builds extracted only MeshId/TextureId/Scale and discarded
+-- the Handle attachment CFrame. That lost the exact orientation/height
+-- data and forced us into unreliable manual CFrame corrections.
+--
+-- This build keeps the Accessory intact and lets Roblox match its Handle
+-- attachment to the avatar's matching Waist*Attachment.
+--------------------------------------------------
+
+WeaponPackRuntime.GINGERSCOPE_NATIVE_ASSET =
+	"rbxassetid://97550774411667"
+
+-- Keep the exact native waist-accessory position.
+-- The previous native position was the one that visually matched your rig.
+WeaponPackRuntime.GINGERSCOPE_BODY_INSET =
+	0.06
+
+WeaponPackRuntime.gingerscopeNativeAccessory =
+	WeaponPackRuntime.gingerscopeNativeAccessory
+	or nil
+
+WeaponPackRuntime.gingerscopeNativeCharacter =
+	WeaponPackRuntime.gingerscopeNativeCharacter
+	or nil
+
+function WeaponPackRuntime.destroyGingerscopeNativeAccessory()
+	local accessory =
+		WeaponPackRuntime.gingerscopeNativeAccessory
+
+	if accessory and accessory.Parent then
+		pcall(function()
+			accessory:Destroy()
+		end)
+	end
+
+	WeaponPackRuntime.gingerscopeNativeAccessory = nil
+	WeaponPackRuntime.gingerscopeNativeCharacter = nil
+end
+
+function WeaponPackRuntime.setGingerscopeNativeVisible(visible)
+	local accessory =
+		WeaponPackRuntime.gingerscopeNativeAccessory
+
+	if not accessory or not accessory.Parent then
+		return false
+	end
+
+	for _, object in ipairs(accessory:GetDescendants()) do
+		if object:IsA("BasePart") then
+			object.LocalTransparencyModifier =
+				visible and 0 or 1
+
+		elseif object:IsA("Decal")
+			or object:IsA("Texture") then
+
+			object.Transparency =
+				visible and 0 or 1
+
+		elseif object:IsA("ParticleEmitter")
+			or object:IsA("Trail")
+			or object:IsA("Beam")
+			or object:IsA("Smoke")
+			or object:IsA("Fire")
+			or object:IsA("Sparkles") then
+
+			object.Enabled = visible
+		end
+	end
+
+	return true
+end
+
+function WeaponPackRuntime.getNativeAccessoryHandle(accessory)
+	if not accessory then
+		return nil
+	end
+
+	local handle =
+		accessory:FindFirstChild("Handle")
+
+	if handle and handle:IsA("BasePart") then
+		return handle
+	end
+
+	return accessory:FindFirstChildWhichIsA(
+		"BasePart",
+		true
+	)
+end
+
+function WeaponPackRuntime.getNativeAccessoryAttachment(handle)
+	if not handle then
+		return nil
+	end
+
+	-- Prefer waist attachments because this asset is a Waist Accessory.
+	for _, attachmentName in ipairs({
+		"WaistCenterAttachment",
+		"WaistFrontAttachment",
+		"WaistBackAttachment",
+	}) do
+		local attachment =
+			handle:FindFirstChild(
+				attachmentName
+			)
+
+		if attachment
+			and attachment:IsA("Attachment") then
+
+			return attachment
+		end
+	end
+
+	-- Fallback: use whichever attachment the UGC creator supplied.
+	return handle:FindFirstChildWhichIsA(
+		"Attachment"
+	)
+end
+
+function WeaponPackRuntime.findCharacterAttachmentByName(
+	character,
+	attachmentName
+)
+	if not character
+		or not attachmentName then
+
+		return nil
+	end
+
+	for _, object in ipairs(character:GetDescendants()) do
+		if object:IsA("Attachment")
+			and object.Name == attachmentName
+			and object.Parent
+			and object.Parent:IsA("BasePart")
+			and not object:FindFirstAncestorOfClass("Accessory") then
+
+			return object
+		end
+	end
+
+	return nil
+end
+
+function WeaponPackRuntime.getGingerscopeStableFolder()
+	local folder =
+		workspace:FindFirstChild(
+			"SlaveControllerPersistentVisuals"
+		)
+
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name =
+			"SlaveControllerPersistentVisuals"
+		folder:SetAttribute(
+			"ScriptOwnedPersistentVisuals",
+			true
+		)
+		folder.Parent = workspace
+	end
+
+	return folder
+end
+
+function WeaponPackRuntime.isGingerscopeNativeHealthy(
+	character
+)
+	local accessory =
+		WeaponPackRuntime.gingerscopeNativeAccessory
+
+	if not accessory
+		or not accessory.Parent
+		or WeaponPackRuntime.gingerscopeNativeCharacter
+			~= character then
+
+		return false
+	end
+
+	local folder =
+		WeaponPackRuntime.getGingerscopeStableFolder()
+
+	if accessory.Parent ~= folder then
+		return false
+	end
+
+	local handle =
+		WeaponPackRuntime.getNativeAccessoryHandle(
+			accessory
+		)
+
+	if not handle
+		or not handle.Parent then
+
+		return false
+	end
+
+	local accessoryAttachment =
+		WeaponPackRuntime.getNativeAccessoryAttachment(
+			handle
+		)
+
+	if not accessoryAttachment then
+		return false
+	end
+
+	local bodyAttachment =
+		WeaponPackRuntime.findCharacterAttachmentByName(
+			character,
+			accessoryAttachment.Name
+		)
+
+	-- During MM2's teleport/round rebuild there can be a short moment where
+	-- LowerTorso/WaistAttachment is unavailable. Keep the existing visual
+	-- alive and frozen instead of declaring it dead and recreating it.
+	if not bodyAttachment
+		or not bodyAttachment.Parent
+		or not bodyAttachment.Parent:IsA("BasePart") then
+
+		return handle.Anchored == true
+	end
+
+	local weld =
+		handle:FindFirstChild(
+			"PersistentGingerscopeBodyWeld"
+		)
+
+	if not weld
+		or not weld:IsA("Weld")
+		or weld.Part0 ~= bodyAttachment.Parent
+		or weld.Part1 ~= handle then
+
+		return false
+	end
+
+	return true
+end
+
+function WeaponPackRuntime.bindGingerscopeToCurrentWaist(
+	character,
+	accessory
+)
+	if not character
+		or not accessory then
+
+		return false,
+			"missing character/accessory"
+	end
+
+	local handle =
+		WeaponPackRuntime.getNativeAccessoryHandle(
+			accessory
+		)
+
+	if not handle then
+		return false,
+			"native accessory has no Handle"
+	end
+
+	local accessoryAttachment =
+		WeaponPackRuntime.getNativeAccessoryAttachment(
+			handle
+		)
+
+	if not accessoryAttachment then
+		return false,
+			"native accessory has no waist attachment"
+	end
+
+	local bodyAttachment =
+		WeaponPackRuntime.findCharacterAttachmentByName(
+			character,
+			accessoryAttachment.Name
+		)
+
+	if not bodyAttachment
+		or not bodyAttachment.Parent
+		or not bodyAttachment.Parent:IsA("BasePart") then
+
+		-- Preserve the exact current world pose while MM2 rebuilds the torso.
+		handle.Anchored = true
+
+		local staleWeld =
+			handle:FindFirstChild(
+				"PersistentGingerscopeBodyWeld"
+			)
+
+		if staleWeld then
+			staleWeld:Destroy()
+		end
+
+		local staleRootWeld =
+			handle:FindFirstChild(
+				"PersistentGingerscopeRootWeld"
+			)
+
+		if staleRootWeld then
+			staleRootWeld:Destroy()
+		end
+
+		return true,
+			"waiting for waist"
+	end
+
+	local bodyPart =
+		bodyAttachment.Parent
+
+	-- Exact native Roblox waist pose.
+	local nativeWorldCFrame =
+		bodyAttachment.WorldCFrame
+		* accessoryAttachment.CFrame:Inverse()
+
+	local nativeLocalCFrame =
+		bodyPart.CFrame:ToObjectSpace(
+			nativeWorldCFrame
+		)
+
+	-- Move only a tiny amount toward the torso center in BODY LOCAL SPACE.
+	-- Y and rotation remain exactly native.
+	local p =
+		nativeLocalCFrame.Position
+
+	local horizontal =
+		Vector3.new(
+			p.X,
+			0,
+			p.Z
+		)
+
+	local correctedPosition =
+		p
+
+	if horizontal.Magnitude > 0.001 then
+		local correctedMagnitude =
+			math.max(
+				0,
+				horizontal.Magnitude
+					- WeaponPackRuntime.GINGERSCOPE_BODY_INSET
+			)
+
+		local correctedHorizontal =
+			horizontal.Unit
+			* correctedMagnitude
+
+		correctedPosition =
+			Vector3.new(
+				correctedHorizontal.X,
+				p.Y,
+				correctedHorizontal.Z
+			)
+	end
+
+	local correctedLocalCFrame =
+		CFrame.new(
+			correctedPosition
+		)
+		* nativeLocalCFrame.Rotation
+
+	for _, weldName in ipairs({
+		"AccessoryWeld",
+		"PersistentGingerscopeRootWeld",
+		"PersistentGingerscopeBodyWeld",
+	}) do
+		local old =
+			handle:FindFirstChild(
+				weldName
+			)
+
+		if old then
+			old:Destroy()
+		end
+	end
+
+	-- Weld the corrected native pose directly to the torso/waist body part.
+	-- This keeps the same height relative to the outfit when MM2 changes
+	-- HumanoidRootPart <-> LowerTorso spacing between lobby and round.
+	local weld =
+		Instance.new("Weld")
+
+	weld.Name =
+		"PersistentGingerscopeBodyWeld"
+
+	weld.Part0 =
+		bodyPart
+
+	weld.Part1 =
+		handle
+
+	weld.C0 =
+		correctedLocalCFrame
+
+	weld.C1 =
+		CFrame.new()
+
+	weld.Parent =
+		handle
+
+	handle.CFrame =
+		bodyPart.CFrame
+		* correctedLocalCFrame
+
+	handle.Anchored = false
+	handle.CanCollide = false
+	handle.CanTouch = false
+	handle.CanQuery = false
+	handle.Massless = true
+
+	return true
+end
+
+function WeaponPackRuntime.ensureGingerscopeNativeAccessory(
+	character
+)
+	if not character
+		or character ~= player.Character
+		or not character.Parent then
+
+		return false,
+			"character missing"
+	end
+
+	if WeaponPackRuntime.isGingerscopeNativeHealthy(
+		character
+	) then
+
+		local currentAccessory =
+			WeaponPackRuntime.gingerscopeNativeAccessory
+
+		local currentHandle =
+			WeaponPackRuntime.getNativeAccessoryHandle(
+				currentAccessory
+			)
+
+		-- If we were temporarily frozen while the torso was rebuilding,
+		-- bind back to the newly-created waist as soon as it exists.
+		if currentHandle
+			and currentHandle.Anchored then
+
+			WeaponPackRuntime.bindGingerscopeToCurrentWaist(
+				character,
+				currentAccessory
+			)
+		end
+
+		WeaponPackRuntime.setGingerscopeNativeVisible(
+			true
+		)
+
+		return true
+	end
+
+	-- Before rebuilding the whole accessory, try repairing the existing one.
+	local existingAccessory =
+		WeaponPackRuntime.gingerscopeNativeAccessory
+
+	if existingAccessory
+		and existingAccessory.Parent then
+
+		local repaired =
+			WeaponPackRuntime.bindGingerscopeToCurrentWaist(
+				character,
+				existingAccessory
+			)
+
+		if repaired then
+			WeaponPackRuntime.setGingerscopeNativeVisible(
+				true
+			)
+
+			return true
+		end
+	end
+
+	WeaponPackRuntime.destroyGingerscopeNativeAccessory()
+
+	local folder =
+		WeaponPackRuntime.getGingerscopeStableFolder()
+
+	-- Remove stale copies from BOTH old Character-parented builds
+	-- and the stable workspace folder.
+	for _, container in ipairs({
+		character,
+		folder,
+	}) do
+		for _, child in ipairs(
+			container:GetChildren()
+		) do
+			if child.Name ==
+					"PersistentGingerscopeAccessory"
+				or child:GetAttribute(
+					"BotControllerNativeGingerscope"
+				) == true then
+
+				pcall(function()
+					child:Destroy()
+				end)
+			end
+		end
+	end
+
+	local ok, objects =
+		pcall(function()
+			return game:GetObjects(
+				WeaponPackRuntime.GINGERSCOPE_NATIVE_ASSET
+			)
+		end)
+
+	if not ok
+		or type(objects) ~= "table"
+		or #objects == 0 then
+
+		return false,
+			"could not load native Gingerscope waist accessory"
+	end
+
+	local accessory = nil
+
+	for _, object in ipairs(objects) do
+		if object:IsA("Accessory") then
+			accessory = object
+			break
+		end
+
+		local descendant =
+			object:FindFirstChildWhichIsA(
+				"Accessory",
+				true
+			)
+
+		if descendant then
+			accessory = descendant
+			accessory.Parent = nil
+			break
+		end
+	end
+
+	for _, object in ipairs(objects) do
+		if object ~= accessory
+			and not (
+				accessory
+				and accessory:IsDescendantOf(object)
+			) then
+
+			pcall(function()
+				object:Destroy()
+			end)
+		end
+	end
+
+	if not accessory then
+		return false,
+			"catalog asset did not return an Accessory"
+	end
+
+	accessory.Name =
+		"PersistentGingerscopeAccessory"
+
+	accessory:SetAttribute(
+		"ScriptOwnedWeapon",
+		true
+	)
+
+	accessory:SetAttribute(
+		"BotControllerNativeGingerscope",
+		true
+	)
+
+	accessory:SetAttribute(
+		"OwnerUserId",
+		player.UserId
+	)
+
+	local handle =
+		WeaponPackRuntime.getNativeAccessoryHandle(
+			accessory
+		)
+
+	if not handle then
+		accessory:Destroy()
+		return false,
+			"native accessory has no Handle"
+	end
+
+	handle.CanCollide = false
+	handle.CanTouch = false
+	handle.CanQuery = false
+	handle.Massless = true
+	handle.Anchored = false
+
+	local accessoryAttachment =
+		WeaponPackRuntime.getNativeAccessoryAttachment(
+			handle
+		)
+
+	if not accessoryAttachment then
+		accessory:Destroy()
+		return false,
+			"native waist accessory has no attachment"
+	end
+
+	local bodyAttachment =
+		WeaponPackRuntime.findCharacterAttachmentByName(
+			character,
+			accessoryAttachment.Name
+		)
+
+	if not bodyAttachment then
+		accessory:Destroy()
+		return false,
+			"character is missing " ..
+			tostring(accessoryAttachment.Name)
+	end
+
+	-- Parent OUTSIDE Character before welding.
+	-- This is the key round-persistence change.
+	accessory.Parent = folder
+
+	local oldWeld =
+		handle:FindFirstChild(
+			"AccessoryWeld"
+		)
+
+	if oldWeld then
+		oldWeld:Destroy()
+	end
+
+	-- Parent is stable workspace storage; pose is owned by the waist weld.
+	local bindOk, bindReason =
+		WeaponPackRuntime.bindGingerscopeToCurrentWaist(
+			character,
+			accessory
+		)
+
+	if not bindOk then
+		accessory:Destroy()
+
+		return false,
+			bindReason
+			or "could not bind Gingerscope to waist"
+	end
+
+	WeaponPackRuntime.gingerscopeNativeAccessory =
+		accessory
+
+	WeaponPackRuntime.gingerscopeNativeCharacter =
+		character
+
+	WeaponPackRuntime.setGingerscopeNativeVisible(
+		true
+	)
+
+	return true
+end
+
+
+-- Strict Gingerscope visual isolation:
+--   * NEVER modifies a knife.
+--   * NEVER mesh-swaps/re-equips an MM2 weapon.
+--   * Hides only containers that are definitely guns:
+--       - Tool/model/accessory name says gun/revolver, OR
+--       - it contains MM2's GunBelt attachment.
+--   * Explicitly restores definite knife containers in case an older
+--     generic mask touched them earlier in the session.
+-- Gingerscope visual isolation is implemented later, after the script's
+-- full MM2 original-weapon detector is defined. That detector is more robust
+-- than the earlier name-only Gun/Revolver filter.
+
+
 function WeaponPackRuntime.resolveRuntimeWeaponVisual(
 	wantedName
 )
-	-- Working-guns build: all remaining guns have exact data.
-	-- Deep runtime scanning is disabled to keep the game lightweight.
+	local cached =
+		WeaponPackRuntime.RUNTIME_WEAPON_VISUAL_CACHE[
+			wantedName
+		]
+
+	if cached then
+		return cached
+	end
+
+	local expectedType =
+		WeaponPackRuntime.WEAPON_TYPE_HINTS[
+			wantedName
+		]
+		or "Knife"
+
+	local syncRecord =
+		WeaponPackRuntime.resolveSyncRecord(
+			wantedName
+		)
+
+	local visual = nil
+
+	-- Fast path: MM2's Sync.Weapons entry may already contain mesh data.
+	if syncRecord
+		and type(syncRecord.data) == "table" then
+
+		visual =
+			WeaponPackRuntime.extractVisualTable(
+				syncRecord.data,
+				expectedType,
+				wantedName
+			)
+
+		if visual then
+			visual.Source = "MM2 Sync.Weapons"
+		end
+	end
+
+	-- Only run the heavier lookups for a weapon that has no verified fallback.
+	if not visual then
+		visual =
+			WeaponPackRuntime.searchLoadedGCTables(
+				wantedName,
+				expectedType,
+				syncRecord
+			)
+	end
+
+	if not visual then
+		visual =
+			WeaponPackRuntime.searchLoadedModules(
+				wantedName,
+				expectedType,
+				syncRecord
+			)
+	end
+
+	if not visual then
+		visual =
+			WeaponPackRuntime.searchReplicatedStorage(
+				wantedName,
+				expectedType,
+				syncRecord
+			)
+	end
+
+	if not visual then
+		visual =
+			WeaponPackRuntime.loadCatalogWeaponVisual(
+				wantedName
+			)
+	end
+
+	if visual and visual.MeshId then
+		visual.Type =
+			visual.Type
+			or expectedType
+
+		visual.Placement =
+			visual.Placement
+			or (
+				expectedType == "Gun"
+				and "WaistRight"
+				or "WaistLeft"
+			)
+
+		WeaponPackRuntime.RUNTIME_WEAPON_VISUAL_CACHE[
+			wantedName
+		] = visual
+
+		return visual
+	end
+
 	return nil
 end
 
@@ -2280,17 +3233,17 @@ WeaponPackRuntime.startOneSliceForGui(
 local main = Instance.new("Frame")
 main.Size = UDim2.new(0, 360, 0, 540)
 main.Position = UDim2.new(0.5, -180, 0.5, -270)
-main.BackgroundColor3 = Color3.fromRGB(10, 10, 13)
+main.BackgroundColor3 = Color3.fromRGB(5, 4, 6)
 main.BorderSizePixel = 0
 main.Parent = gui
 
 local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 14)
+corner.CornerRadius = UDim.new(0, 6)
 corner.Parent = main
 
 local stroke = Instance.new("UIStroke")
-stroke.Color = Color3.fromRGB(168, 168, 182)
-stroke.Thickness = 1.2
+stroke.Color = Color3.fromRGB(145, 8, 24)
+stroke.Thickness = 2
 stroke.Parent = main
 
 --------------------------------------------------
@@ -2337,19 +3290,21 @@ title.Size = UDim2.new(1, -135, 0, 40)
 title.Position = UDim2.new(0, 24, 0, 20)
 title.BackgroundTransparency = 1
 title.Text = "SLAVE CONTROLLER"
-title.TextColor3 = Color3.new(1, 1, 1)
-title.TextSize = 20
-title.Font = Enum.Font.GothamBold
+title.TextColor3 = Color3.fromRGB(242, 232, 234)
+title.TextSize = 21
+title.Font = Enum.Font.Antique
 title.TextXAlignment = Enum.TextXAlignment.Left
+title.TextStrokeColor3 = Color3.fromRGB(92, 0, 15)
+title.TextStrokeTransparency = 0.35
 title.Parent = main
 
 local topOrnament = Instance.new("TextLabel")
 topOrnament.Size = UDim2.new(0, 120, 0, 18)
 topOrnament.Position = UDim2.new(0.5, -60, 0, 2)
 topOrnament.BackgroundTransparency = 1
-topOrnament.Text = "⸸  ·  ⛧  ·  ⸸"
-topOrnament.TextColor3 = Color3.fromRGB(125, 125, 138)
-topOrnament.TextSize = 12
+topOrnament.Text = "⸸  ⛧  †  ⛧  ⸸"
+topOrnament.TextColor3 = Color3.fromRGB(180, 18, 38)
+topOrnament.TextSize = 14
 topOrnament.Font = Enum.Font.GothamSemibold
 topOrnament.TextXAlignment = Enum.TextXAlignment.Center
 topOrnament.Parent = main
@@ -2358,8 +3313,8 @@ local leftThorn = Instance.new("TextLabel")
 leftThorn.Size = UDim2.new(0, 18, 1, -34)
 leftThorn.Position = UDim2.new(0, 2, 0, 18)
 leftThorn.BackgroundTransparency = 1
-leftThorn.Text = "⟡\n│\n✧\n│\n⟡\n│\n✧\n│\n⟡"
-leftThorn.TextColor3 = Color3.fromRGB(72, 72, 84)
+leftThorn.Text = "†\n╽\n⛧\n╿\n✦\n╽\n⛧\n╿\n†"
+leftThorn.TextColor3 = Color3.fromRGB(105, 8, 22)
 leftThorn.TextSize = 11
 leftThorn.Font = Enum.Font.Gotham
 leftThorn.TextWrapped = true
@@ -2369,8 +3324,8 @@ local rightThorn = Instance.new("TextLabel")
 rightThorn.Size = UDim2.new(0, 18, 1, -34)
 rightThorn.Position = UDim2.new(1, -20, 0, 18)
 rightThorn.BackgroundTransparency = 1
-rightThorn.Text = "⟡\n│\n✧\n│\n⟡\n│\n✧\n│\n⟡"
-rightThorn.TextColor3 = Color3.fromRGB(72, 72, 84)
+rightThorn.Text = "†\n╽\n⛧\n╿\n✦\n╽\n⛧\n╿\n†"
+rightThorn.TextColor3 = Color3.fromRGB(105, 8, 22)
 rightThorn.TextSize = 11
 rightThorn.Font = Enum.Font.Gotham
 rightThorn.TextWrapped = true
@@ -2379,11 +3334,13 @@ rightThorn.Parent = main
 local bapLabel = Instance.new("TextLabel")
 bapLabel.BackgroundTransparency = 1
 bapLabel.Text = "B A P"
-bapLabel.TextColor3 = Color3.fromRGB(215, 215, 225)
+bapLabel.TextColor3 = Color3.fromRGB(166, 12, 31)
 bapLabel.TextXAlignment = Enum.TextXAlignment.Left
 bapLabel.TextYAlignment = Enum.TextYAlignment.Center
 bapLabel.TextSize = 14
 bapLabel.Font = Enum.Font.GothamSemibold -- fallback until the UI's One Slice font loads
+bapLabel.TextStrokeColor3 = Color3.fromRGB(45, 0, 8)
+bapLabel.TextStrokeTransparency = 0.35
 bapLabel.ZIndex = 5
 bapLabel.Visible = false
 bapLabel.Parent = main
@@ -2397,7 +3354,7 @@ status.Size = UDim2.new(1, -36, 0, 22)
 status.Position = UDim2.new(0, 18, 0, 58)
 status.BackgroundTransparency = 1
 status.Text = "● STOPPED"
-status.TextColor3 = Color3.fromRGB(255, 80, 80)
+status.TextColor3 = Color3.fromRGB(220, 22, 45)
 status.TextSize = 14
 status.Font = Enum.Font.Gotham
 status.TextXAlignment = Enum.TextXAlignment.Left
@@ -2412,23 +3369,23 @@ local function createButton(text, position, size, parentOverride)
 
 	button.Size = size or UDim2.new(1, -36, 0, 42)
 	button.Position = position
-	button.BackgroundColor3 = Color3.fromRGB(24, 24, 31)
+	button.BackgroundColor3 = Color3.fromRGB(14, 7, 10)
 	button.BorderSizePixel = 0
 	button.Text = text
-	button.TextColor3 = Color3.fromRGB(232, 232, 238)
+	button.TextColor3 = Color3.fromRGB(240, 226, 230)
 	button.TextSize = 15
-	button.Font = Enum.Font.GothamSemibold
+	button.Font = Enum.Font.GothamBold
 	button.AutoButtonColor = true
 	button.Parent = parentOverride or main
 
 	local c = Instance.new("UICorner")
-	c.CornerRadius = UDim.new(0, 7)
+	c.CornerRadius = UDim.new(0, 3)
 	c.Parent = button
 
 	local s = Instance.new("UIStroke")
-	s.Color = Color3.fromRGB(95, 95, 110)
-	s.Thickness = 1
-	s.Transparency = 0.12
+	s.Color = Color3.fromRGB(105, 7, 22)
+	s.Thickness = 1.25
+	s.Transparency = 0.05
 	s.Parent = button
 
 	return button
@@ -2438,17 +3395,83 @@ end
 -- TABS
 --------------------------------------------------
 
+WeaponPackRuntime.ControllerUI = WeaponPackRuntime.ControllerUI or {}
+
+-- Gothic black/red ornament layer. Visual only.
+WeaponPackRuntime.ControllerUI.MainGradient = Instance.new("UIGradient")
+WeaponPackRuntime.ControllerUI.MainGradient.Name = "GothicBackgroundGradient"
+WeaponPackRuntime.ControllerUI.MainGradient.Rotation = 90
+WeaponPackRuntime.ControllerUI.MainGradient.Color = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 5, 9)),
+	ColorSequenceKeypoint.new(0.22, Color3.fromRGB(7, 4, 6)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(3, 3, 4)),
+})
+WeaponPackRuntime.ControllerUI.MainGradient.Parent = main
+
+WeaponPackRuntime.ControllerUI.HeaderRule = Instance.new("Frame")
+WeaponPackRuntime.ControllerUI.HeaderRule.Name = "GothicHeaderRule"
+WeaponPackRuntime.ControllerUI.HeaderRule.Size = UDim2.new(1, -54, 0, 1)
+WeaponPackRuntime.ControllerUI.HeaderRule.Position = UDim2.new(0, 27, 0, 86)
+WeaponPackRuntime.ControllerUI.HeaderRule.BackgroundColor3 = Color3.fromRGB(118, 7, 24)
+WeaponPackRuntime.ControllerUI.HeaderRule.BorderSizePixel = 0
+WeaponPackRuntime.ControllerUI.HeaderRule.ZIndex = 3
+WeaponPackRuntime.ControllerUI.HeaderRule.Parent = main
+
+WeaponPackRuntime.ControllerUI.HeaderSigil = Instance.new("TextLabel")
+WeaponPackRuntime.ControllerUI.HeaderSigil.Name = "GothicHeaderSigil"
+WeaponPackRuntime.ControllerUI.HeaderSigil.Size = UDim2.new(0, 150, 0, 18)
+WeaponPackRuntime.ControllerUI.HeaderSigil.Position = UDim2.new(0.5, -75, 0, 77)
+WeaponPackRuntime.ControllerUI.HeaderSigil.BackgroundColor3 = Color3.fromRGB(5, 4, 6)
+WeaponPackRuntime.ControllerUI.HeaderSigil.BackgroundTransparency = 0
+WeaponPackRuntime.ControllerUI.HeaderSigil.Text = "†  ──  ⛧  ──  †"
+WeaponPackRuntime.ControllerUI.HeaderSigil.TextColor3 = Color3.fromRGB(174, 14, 34)
+WeaponPackRuntime.ControllerUI.HeaderSigil.TextSize = 12
+WeaponPackRuntime.ControllerUI.HeaderSigil.Font = Enum.Font.Antique
+WeaponPackRuntime.ControllerUI.HeaderSigil.ZIndex = 4
+WeaponPackRuntime.ControllerUI.HeaderSigil.Parent = main
+
+WeaponPackRuntime.ControllerUI.TopLeftRune = Instance.new("TextLabel")
+WeaponPackRuntime.ControllerUI.TopLeftRune.Name = "TopLeftRune"
+WeaponPackRuntime.ControllerUI.TopLeftRune.Size = UDim2.new(0, 28, 0, 28)
+WeaponPackRuntime.ControllerUI.TopLeftRune.Position = UDim2.new(0, 3, 0, 1)
+WeaponPackRuntime.ControllerUI.TopLeftRune.BackgroundTransparency = 1
+WeaponPackRuntime.ControllerUI.TopLeftRune.Text = "⛧"
+WeaponPackRuntime.ControllerUI.TopLeftRune.TextColor3 = Color3.fromRGB(128, 7, 25)
+WeaponPackRuntime.ControllerUI.TopLeftRune.TextSize = 17
+WeaponPackRuntime.ControllerUI.TopLeftRune.Font = Enum.Font.Antique
+WeaponPackRuntime.ControllerUI.TopLeftRune.ZIndex = 4
+WeaponPackRuntime.ControllerUI.TopLeftRune.Parent = main
+
+WeaponPackRuntime.ControllerUI.TopRightRune = Instance.new("TextLabel")
+WeaponPackRuntime.ControllerUI.TopRightRune.Name = "TopRightRune"
+WeaponPackRuntime.ControllerUI.TopRightRune.Size = UDim2.new(0, 28, 0, 28)
+WeaponPackRuntime.ControllerUI.TopRightRune.Position = UDim2.new(1, -31, 0, 1)
+WeaponPackRuntime.ControllerUI.TopRightRune.BackgroundTransparency = 1
+WeaponPackRuntime.ControllerUI.TopRightRune.Text = "⛧"
+WeaponPackRuntime.ControllerUI.TopRightRune.TextColor3 = Color3.fromRGB(128, 7, 25)
+WeaponPackRuntime.ControllerUI.TopRightRune.TextSize = 17
+WeaponPackRuntime.ControllerUI.TopRightRune.Font = Enum.Font.Antique
+WeaponPackRuntime.ControllerUI.TopRightRune.ZIndex = 4
+WeaponPackRuntime.ControllerUI.TopRightRune.Parent = main
+
 local botsTabButton = createButton(
 	"BOTS",
-	UDim2.new(0, 24, 0, 98),
-	UDim2.new(0, 150, 0, 36)
+	UDim2.new(0, 102, 0, 98),
+	UDim2.new(0, 72, 0, 36)
 )
 
 local weaponsTabButton = createButton(
-	"WEAPONS",
-	UDim2.new(0, 186, 0, 98),
+	"WEP EQUIP",
+	UDim2.new(0, 24, 0, 98),
+	UDim2.new(0, 72, 0, 36)
+)
+
+WeaponPackRuntime.ControllerUI.SpawnerTradeTabButton = createButton(
+	"SPAWNER / TRADE",
+	UDim2.new(0, 180, 0, 98),
 	UDim2.new(0, 150, 0, 36)
 )
+WeaponPackRuntime.ControllerUI.SpawnerTradeTabButton.TextSize = 13
 
 local botsPage = Instance.new("Frame")
 botsPage.Size = UDim2.new(1, -48, 1, -156)
@@ -2463,37 +3486,100 @@ weaponsPage.BackgroundTransparency = 1
 weaponsPage.Visible = false
 weaponsPage.Parent = main
 
+WeaponPackRuntime.ControllerUI.SpawnerTradePage = Instance.new("Frame")
+WeaponPackRuntime.ControllerUI.SpawnerTradePage.Name = "SpawnerTradePage"
+WeaponPackRuntime.ControllerUI.SpawnerTradePage.Size = UDim2.new(1, -48, 1, -156)
+WeaponPackRuntime.ControllerUI.SpawnerTradePage.Position = UDim2.new(0, 24, 0, 142)
+WeaponPackRuntime.ControllerUI.SpawnerTradePage.BackgroundTransparency = 1
+WeaponPackRuntime.ControllerUI.SpawnerTradePage.Visible = false
+WeaponPackRuntime.ControllerUI.SpawnerTradePage.Parent = main
+
+WeaponPackRuntime.ControllerUI.SpawnerPage = Instance.new("Frame")
+WeaponPackRuntime.ControllerUI.SpawnerPage.Size = UDim2.new(1, 0, 1, -48)
+WeaponPackRuntime.ControllerUI.SpawnerPage.Position = UDim2.new(0, 0, 0, 48)
+WeaponPackRuntime.ControllerUI.SpawnerPage.BackgroundTransparency = 1
+WeaponPackRuntime.ControllerUI.SpawnerPage.Visible = false
+WeaponPackRuntime.ControllerUI.SpawnerPage.Parent =
+	WeaponPackRuntime.ControllerUI.SpawnerTradePage
+
+WeaponPackRuntime.ControllerUI.TradePage = Instance.new("Frame")
+WeaponPackRuntime.ControllerUI.TradePage.Size = UDim2.new(1, 0, 1, -48)
+WeaponPackRuntime.ControllerUI.TradePage.Position = UDim2.new(0, 0, 0, 48)
+WeaponPackRuntime.ControllerUI.TradePage.BackgroundTransparency = 1
+WeaponPackRuntime.ControllerUI.TradePage.Visible = false
+WeaponPackRuntime.ControllerUI.TradePage.Parent =
+	WeaponPackRuntime.ControllerUI.SpawnerTradePage
+
 -- Bap branding: same style/font as the rest of the UI, BOTS tab only.
 -- Positioned at the bottom-left, enlarged to roughly 3x the previous size.
 bapLabel.Parent = botsPage
-bapLabel.Size = UDim2.new(0, 190, 0, 68)
-bapLabel.Position = UDim2.new(0, -6, 1, -70)
+bapLabel.Size = UDim2.new(0, 210, 0, 76)
+bapLabel.Position = UDim2.new(0, -10, 1, -60)
 bapLabel.AnchorPoint = Vector2.new(0, 0)
 bapLabel.Text = "B A P"
-bapLabel.TextSize = 50
+bapLabel.TextSize = 58
 bapLabel.TextScaled = false
 bapLabel.TextXAlignment = Enum.TextXAlignment.Left
 bapLabel.Visible = true
 
+-- Exact BAP clones for WEP EQUIP and the combined SPAWNER / TRADE tab.
+-- These are cloned from the already configured BOTS BAP label, so size,
+-- position, font, color, stroke, alignment, and every visual property match.
+WeaponPackRuntime.ControllerUI.WeaponsBapLabel = bapLabel:Clone()
+WeaponPackRuntime.ControllerUI.WeaponsBapLabel.Name = "WeaponsBapLabel"
+WeaponPackRuntime.ControllerUI.WeaponsBapLabel.Parent = weaponsPage
+WeaponPackRuntime.ControllerUI.WeaponsBapLabel.Visible = true
+
+WeaponPackRuntime.ControllerUI.SpawnerTradeBapLabel = bapLabel:Clone()
+WeaponPackRuntime.ControllerUI.SpawnerTradeBapLabel.Name = "SpawnerTradeBapLabel"
+WeaponPackRuntime.ControllerUI.SpawnerTradeBapLabel.Parent =
+	WeaponPackRuntime.ControllerUI.SpawnerTradePage
+WeaponPackRuntime.ControllerUI.SpawnerTradeBapLabel.Visible = true
+
 local function setActiveTab(tabName)
 	local botsActive =
 		tabName == "BOTS"
+	local weaponsActive =
+		tabName == "WEAPONS"
+	local spawnerActive =
+		tabName == "SPAWNER"
+	local tradeActive =
+		tabName == "TRADE"
+	local spawnerTradeActive =
+		tabName == "SPAWNER_TRADE"
+		or spawnerActive
+		or tradeActive
 
 	botsPage.Visible =
 		botsActive
 
 	weaponsPage.Visible =
-		not botsActive
+		weaponsActive
+
+	WeaponPackRuntime.ControllerUI.SpawnerTradePage.Visible =
+		spawnerTradeActive
+
+	WeaponPackRuntime.ControllerUI.SpawnerPage.Visible =
+		false
+
+	WeaponPackRuntime.ControllerUI.TradePage.Visible =
+		false
 
 	botsTabButton.BackgroundColor3 =
 		botsActive
-		and Color3.fromRGB(65, 65, 80)
-		or Color3.fromRGB(24, 24, 31)
+		and Color3.fromRGB(92, 7, 20)
+		or Color3.fromRGB(14, 7, 10)
 
 	weaponsTabButton.BackgroundColor3 =
-		(not botsActive)
-		and Color3.fromRGB(65, 65, 80)
-		or Color3.fromRGB(24, 24, 31)
+		weaponsActive
+		and Color3.fromRGB(92, 7, 20)
+		or Color3.fromRGB(14, 7, 10)
+
+	WeaponPackRuntime.ControllerUI.SpawnerTradeTabButton.BackgroundColor3 =
+		spawnerTradeActive
+		and Color3.fromRGB(92, 7, 20)
+		or Color3.fromRGB(14, 7, 10)
+
 end
 
 botsTabButton.MouseButton1Click:Connect(function()
@@ -2502,6 +3588,3395 @@ end)
 
 weaponsTabButton.MouseButton1Click:Connect(function()
 	setActiveTab("WEAPONS")
+end)
+
+WeaponPackRuntime.ControllerUI.SpawnerTradeTabButton.MouseButton1Click:Connect(function()
+	setActiveTab("SPAWNER_TRADE")
+end)
+
+WeaponPackRuntime.ControllerUI.AutoTradeLabel = Instance.new("TextLabel")
+WeaponPackRuntime.ControllerUI.AutoTradeLabel.Size = UDim2.new(0, 214, 0, 58)
+WeaponPackRuntime.ControllerUI.AutoTradeLabel.Position = UDim2.new(0, 6, 0, 140)
+WeaponPackRuntime.ControllerUI.AutoTradeLabel.BackgroundColor3 = Color3.fromRGB(14, 7, 10)
+WeaponPackRuntime.ControllerUI.AutoTradeLabel.BackgroundTransparency = 0
+WeaponPackRuntime.ControllerUI.AutoTradeLabel.BorderSizePixel = 0
+WeaponPackRuntime.ControllerUI.AutoTradeLabel.Text = "AUTO TRADE"
+WeaponPackRuntime.ControllerUI.AutoTradeLabel.TextColor3 = Color3.fromRGB(240, 226, 230)
+WeaponPackRuntime.ControllerUI.AutoTradeLabel.TextSize = 16
+WeaponPackRuntime.ControllerUI.AutoTradeLabel.Font = Enum.Font.GothamBold
+WeaponPackRuntime.ControllerUI.AutoTradeLabel.TextXAlignment = Enum.TextXAlignment.Center
+WeaponPackRuntime.ControllerUI.AutoTradeLabel.Parent =
+	WeaponPackRuntime.ControllerUI.SpawnerTradePage
+
+WeaponPackRuntime.ControllerUI.AutoTradeLabelCorner = Instance.new("UICorner")
+WeaponPackRuntime.ControllerUI.AutoTradeLabelCorner.CornerRadius = UDim.new(0, 3)
+WeaponPackRuntime.ControllerUI.AutoTradeLabelCorner.Parent =
+	WeaponPackRuntime.ControllerUI.AutoTradeLabel
+
+WeaponPackRuntime.ControllerUI.AutoTradeLabelStroke = Instance.new("UIStroke")
+WeaponPackRuntime.ControllerUI.AutoTradeLabelStroke.Color = Color3.fromRGB(105, 7, 22)
+WeaponPackRuntime.ControllerUI.AutoTradeLabelStroke.Thickness = 1.25
+WeaponPackRuntime.ControllerUI.AutoTradeLabelStroke.Transparency = 0.05
+WeaponPackRuntime.ControllerUI.AutoTradeLabelStroke.Parent =
+	WeaponPackRuntime.ControllerUI.AutoTradeLabel
+
+WeaponPackRuntime.ControllerUI.AutoTradeEnabled = false
+WeaponPackRuntime.ControllerUI.AutoTradeButton = createButton(
+	"OFF",
+	UDim2.new(0, 232, 0, 140),
+	UDim2.new(0, 74, 0, 58),
+	WeaponPackRuntime.ControllerUI.SpawnerTradePage
+)
+
+--------------------------------------------------
+-- FAKE TRADE
+-- Based on CartiMM2's fake-trade flow.
+-- Uses MM2's own TradeModule GUI. No custom trade window is drawn.
+--------------------------------------------------
+
+WeaponPackRuntime.FakeTrade = WeaponPackRuntime.FakeTrade or {}
+WeaponPackRuntime.FakeTrade.Enabled = false
+WeaponPackRuntime.FakeTrade.Active = false
+WeaponPackRuntime.FakeTrade.LocalOffer = {}
+WeaponPackRuntime.FakeTrade.TheirOffer = {}
+WeaponPackRuntime.FakeTrade.LocalAcceptMode = "Accept"
+WeaponPackRuntime.FakeTrade.LocalConfirmStartedAt = 0
+WeaponPackRuntime.FakeTrade.OtherAccepted = false
+WeaponPackRuntime.FakeTrade.CooldownEndsAt = 0
+WeaponPackRuntime.FakeTrade.CooldownSequence = 0
+WeaponPackRuntime.FakeTrade.OtherAcceptSequence = 0
+WeaponPackRuntime.FakeTrade.GuardSequence = 0
+WeaponPackRuntime.FakeTrade.GuardConnections = {}
+WeaponPackRuntime.FakeTrade.SearchConnection = nil
+WeaponPackRuntime.FakeTrade.CurrentFakeName = "RandomPlayer"
+
+WeaponPackRuntime.FakeTrade.FakeNames = {
+	"XKylie_2010",
+	"lakyboxsuperfann",
+	"staglagala",
+	"Anniev6157",
+	"Augus0260",
+	"carla_zion1",
+	"itsme_ai1231",
+	"GamergirlYT34577",
+	"zoey685547",
+	"baconkind68",
+	"Amberx_xplayzz",
+	"ethantherealsniper",
+	"PrimPrim88009",
+	"L0veBound",
+	"balakajan_12345",
+	"black_totts",
+	"lewis3417",
+	"They1uv_Z",
+	"Bluelockgod12101",
+	"BarbaFam9166",
+	"STEVEN_AOTlol",
+	"Axisp0",
+	"Robloxiana3o2w6j0c",
+	"Killer_03boy",
+	"White170256",
+	"Sigma_of404",
+	"jayabearrpurr",
+	"ClaraZIzose",
+	"XxTWIC3xX",
+	"dark_moon092",
+	"MRSCHOCOLATE321",
+	"Pookung_M",
+	"Ameerzelen",
+	"Poolxdwwwww",
+	"xerluv",
+	"zhenya_13008",
+	"kinji3488",
+	"AmirGtMl",
+	"fuji_XxD",
+	"Angela320224",
+	"Ariayourpookie",
+	"D1N0ST3R",
+	"Eguiller2",
+	"JSBoss1111",
+	"DanielLikesRice2",
+	"shanksthegreat26",
+	"aydendesu",
+	"james1004338",
+}
+
+WeaponPackRuntime.FakeTrade.LoadModules = function()
+	if WeaponPackRuntime.FakeTrade.ModulesLoaded then
+		return true
+	end
+
+	if not WeaponPackRuntime.RealisticSpawner
+		or not WeaponPackRuntime.RealisticSpawner.LoadModules
+		or not WeaponPackRuntime.RealisticSpawner.LoadModules() then
+
+		warn(
+			"[BAP Trade] Could not load MM2 inventory modules."
+		)
+
+		return false
+	end
+
+	local modules =
+		ReplicatedStorage:FindFirstChild(
+			"Modules"
+		)
+
+	if not modules then
+		return false
+	end
+
+	local okTrade, tradeModule =
+		pcall(function()
+			return require(
+				modules:WaitForChild(
+					"TradeModule",
+					5
+				)
+			)
+		end)
+
+	local okItem, itemModule =
+		pcall(function()
+			return require(
+				modules:WaitForChild(
+					"ItemModule",
+					5
+				)
+			)
+		end)
+
+	if not okTrade
+		or type(tradeModule) ~= "table"
+		or not okItem
+		or type(itemModule) ~= "table" then
+
+		warn(
+			"[BAP Trade] Could not load MM2 trade modules."
+		)
+
+		return false
+	end
+
+	WeaponPackRuntime.FakeTrade.TradeModule =
+		tradeModule
+
+	WeaponPackRuntime.FakeTrade.ItemModule =
+		itemModule
+
+	WeaponPackRuntime.FakeTrade.InventoryModule =
+		WeaponPackRuntime.RealisticSpawner.InventoryModule
+
+	WeaponPackRuntime.FakeTrade.ProfileData =
+		WeaponPackRuntime.RealisticSpawner.ProfileData
+
+	WeaponPackRuntime.FakeTrade.Sync =
+		WeaponPackRuntime.RealisticSpawner.Sync
+
+	WeaponPackRuntime.FakeTrade.ModulesLoaded =
+		true
+
+	return true
+end
+
+WeaponPackRuntime.FakeTrade.PickFakeName = function()
+	local names =
+		WeaponPackRuntime.FakeTrade.FakeNames
+
+	WeaponPackRuntime.FakeTrade.CurrentFakeName =
+		names[
+			math.random(
+				1,
+				#names
+			)
+		]
+		or "RandomPlayer"
+
+	return WeaponPackRuntime.FakeTrade.CurrentFakeName
+end
+
+WeaponPackRuntime.FakeTrade.CleanupOverlays = function()
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local tradeGui =
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.TradeGUI
+
+	if not tradeGui then
+		return
+	end
+
+	for _, descendant in ipairs(
+		tradeGui:GetDescendants()
+	) do
+		if descendant.Name
+				== "ClientPlaceholderTradeRemove"
+			or descendant.Name
+				== "ClientPlaceholderTradeToggle"
+			or descendant.Name
+				== "ClientPlaceholderTradeAcceptBridge"
+			or descendant.Name
+				== "ClientPlaceholderTradeAcceptOverlay"
+			or descendant.Name
+				== "ClientPlaceholderTradeActionOverlay"
+			or descendant.Name
+				== "CartiHubFakeTradeWatermark" then
+
+			descendant:Destroy()
+		end
+	end
+end
+
+WeaponPackRuntime.FakeTrade.GetOwnedTable = function(itemType)
+	if WeaponPackRuntime.RealisticSpawner
+		and WeaponPackRuntime.RealisticSpawner.GetProfileOwnedTable then
+
+		return WeaponPackRuntime.RealisticSpawner.GetProfileOwnedTable(
+			itemType
+		)
+	end
+
+	return nil
+end
+
+WeaponPackRuntime.FakeTrade.TextHasEvoToken = function(value)
+	local textValue =
+		tostring(
+			value or ""
+		):lower()
+
+	return textValue == "evo"
+		or textValue:find(
+			"^evo[%s_%-%./]"
+		) ~= nil
+		or textValue:find(
+			"[%s_%-%./]evo[%s_%-%./]"
+		) ~= nil
+		or textValue:find(
+			"[%s_%-%./]evo$"
+		) ~= nil
+end
+
+WeaponPackRuntime.FakeTrade.CanTradeItem = function(itemId, itemType)
+	local sync =
+		WeaponPackRuntime.FakeTrade.Sync
+
+	local data =
+		sync
+		and sync[itemType]
+		and sync[itemType][itemId]
+
+	if type(data) ~= "table" then
+		return false
+	end
+
+	if data.Tradeable == false
+		or data.Tradable == false
+		or data.NotTradeable == true
+		or data.Untradeable == true
+		or data.Untradable == true
+		or data.IsEvo == true
+		or data.Evo ~= nil
+		or data.Evolution ~= nil
+		or data.EvoData ~= nil
+		or data.EvoBase ~= nil
+		or data.EvoBaseID ~= nil
+		or data.EvoIndex ~= nil
+		or data.EvoLevel ~= nil
+		or data.EvoLevels ~= nil
+		or data.EvoXP ~= nil
+		or data.EvolutionData ~= nil then
+
+		return false
+	end
+
+	return not WeaponPackRuntime.FakeTrade.TextHasEvoToken(
+		itemId
+	)
+		and not WeaponPackRuntime.FakeTrade.TextHasEvoToken(
+			data.ItemName
+		)
+		and not WeaponPackRuntime.FakeTrade.TextHasEvoToken(
+			data.Name
+		)
+end
+
+WeaponPackRuntime.FakeTrade.CopyItemData = function(itemId, itemType, amount)
+	local sync =
+		WeaponPackRuntime.FakeTrade.Sync
+
+	local source =
+		sync
+		and sync[itemType]
+		and sync[itemType][itemId]
+
+	if not source then
+		return nil
+	end
+
+	local data = {}
+
+	for key, value in pairs(
+		source
+	) do
+		data[key] =
+			value
+	end
+
+	data.DataType =
+		itemType
+
+	data.Amount =
+		amount or 1
+
+	return data
+end
+
+WeaponPackRuntime.FakeTrade.ClearOfferSlots = function(offerFrame)
+	if not offerFrame
+		or not offerFrame:FindFirstChild(
+			"Container"
+		) then
+
+		return
+	end
+
+	for index = 1, 4 do
+		local slot =
+			offerFrame.Container:FindFirstChild(
+				"NewItem" .. index
+			)
+
+		if slot then
+			pcall(function()
+				WeaponPackRuntime.FakeTrade.ItemModule.DisplayItem(
+					slot,
+					nil
+				)
+			end)
+
+			slot.Visible =
+				false
+		end
+	end
+end
+
+WeaponPackRuntime.FakeTrade.DrawOfferSlots = function(offerFrame, offerList)
+	WeaponPackRuntime.FakeTrade.ClearOfferSlots(
+		offerFrame
+	)
+
+	for index, offer in ipairs(
+		offerList
+	) do
+		local slot =
+			offerFrame
+			and offerFrame:FindFirstChild(
+				"Container"
+			)
+			and offerFrame.Container:FindFirstChild(
+				"NewItem" .. index
+			)
+
+		local itemData =
+			WeaponPackRuntime.FakeTrade.CopyItemData(
+				offer.ItemID,
+				offer.ItemType,
+				offer.Amount
+			)
+
+		if slot
+			and itemData then
+
+			pcall(function()
+				WeaponPackRuntime.FakeTrade.ItemModule.DisplayItem(
+					slot,
+					itemData
+				)
+			end)
+
+			slot.Visible =
+				true
+		end
+	end
+end
+
+WeaponPackRuntime.FakeTrade.ApplyInventoryDelta = function(itemId, itemType, delta)
+	local owned =
+		WeaponPackRuntime.FakeTrade.GetOwnedTable(
+			itemType
+		)
+
+	if not owned then
+		return
+	end
+
+	local current =
+		tonumber(
+			owned[itemId]
+		) or 0
+
+	local hasFakeStack =
+		WeaponPackRuntime.RealisticSpawner
+		and WeaponPackRuntime.RealisticSpawner.GetFakeInventoryAmount
+		and WeaponPackRuntime.RealisticSpawner.GetFakeInventoryAmount(
+			itemId,
+			itemType
+		) > 0
+
+	local nextAmount
+
+	if hasFakeStack
+		and WeaponPackRuntime.RealisticSpawner.AddFakeInventoryAmount then
+
+		nextAmount =
+			WeaponPackRuntime.RealisticSpawner.AddFakeInventoryAmount(
+				itemId,
+				itemType,
+				delta
+			)
+	else
+		nextAmount =
+			current
+			+ delta
+
+		if nextAmount > 0 then
+			owned[itemId] =
+				nextAmount
+		else
+			owned[itemId] =
+				nil
+		end
+	end
+
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local tradeInventory =
+		tradeModule
+		and tradeModule.TradeInventory
+
+	local entry =
+		tradeInventory
+		and tradeInventory.Data
+		and tradeInventory.Data[itemType]
+		and tradeInventory.Data[itemType].Current
+		and tradeInventory.Data[itemType].Current[itemId]
+
+	if entry then
+		entry.Amount =
+			math.max(
+				0,
+				(tonumber(entry.Amount) or current)
+				+ delta
+			)
+
+		if entry.Frame then
+			if entry.Amount <= 0 then
+				entry.Frame.Visible =
+					false
+			else
+				local itemData =
+					WeaponPackRuntime.FakeTrade.CopyItemData(
+						itemId,
+						itemType,
+						entry.Amount
+					)
+
+				if itemData then
+					pcall(function()
+						WeaponPackRuntime.FakeTrade.ItemModule.DisplayItem(
+							entry.Frame,
+							itemData,
+							nil,
+							true
+						)
+					end)
+				end
+
+				entry.Frame.Visible =
+					true
+			end
+		end
+	end
+end
+
+WeaponPackRuntime.FakeTrade.RestoreLocalOffer = function()
+	for _, offer in ipairs(
+		WeaponPackRuntime.FakeTrade.LocalOffer
+	) do
+		WeaponPackRuntime.FakeTrade.ApplyInventoryDelta(
+			offer.ItemID,
+			offer.ItemType,
+			offer.Amount or 1
+		)
+	end
+
+	table.clear(
+		WeaponPackRuntime.FakeTrade.LocalOffer
+	)
+end
+
+WeaponPackRuntime.FakeTrade.SetAcceptContainerOverlayVisible = function(visible)
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local actions =
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.Actions
+
+	local accept =
+		actions
+		and actions:FindFirstChild(
+			"Accept"
+		)
+
+	local overlay =
+		accept
+		and accept:FindFirstChild(
+			"ClientPlaceholderTradeActionOverlay"
+		)
+
+	if overlay
+		and overlay:IsA(
+			"GuiObject"
+		) then
+
+		overlay.Visible =
+			visible == true
+	end
+end
+
+WeaponPackRuntime.FakeTrade.SetAcceptState = function(mode)
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local gui =
+		tradeModule
+		and tradeModule.GUI
+
+	local actions =
+		gui
+		and gui.Actions
+
+	local accept =
+		actions
+		and actions:FindFirstChild(
+			"Accept"
+		)
+
+	if not accept then
+		return
+	end
+
+	WeaponPackRuntime.FakeTrade.LocalAcceptMode =
+		mode
+
+	if accept:FindFirstChild(
+		"Confirm"
+	) then
+		accept.Confirm.Visible =
+			mode == "Confirm"
+	end
+
+	if accept:FindFirstChild(
+		"Cancel"
+	) then
+		accept.Cancel.Visible =
+			mode == "Waiting"
+			or mode == "BothAccepted"
+	end
+
+	if accept:FindFirstChild(
+		"Cooldown"
+	)
+		and mode ~= "Cooldown" then
+
+		accept.Cooldown.Visible =
+			false
+	end
+
+	if accept:FindFirstChild(
+		"AddItem"
+	) then
+		accept.AddItem.Visible =
+			mode == "Cooldown"
+	end
+
+	if gui.YourOffer
+		and gui.YourOffer:FindFirstChild(
+			"Accepted"
+		) then
+
+		gui.YourOffer.Accepted.Visible =
+			mode == "Waiting"
+			or mode == "BothAccepted"
+	end
+
+	if gui.TheirOffer
+		and gui.TheirOffer:FindFirstChild(
+			"Accepted"
+		) then
+
+		gui.TheirOffer.Accepted.Visible =
+			WeaponPackRuntime.FakeTrade.OtherAccepted == true
+			or mode == "BothAccepted"
+	end
+
+	WeaponPackRuntime.FakeTrade.SetAcceptContainerOverlayVisible(
+		mode == "Accept"
+	)
+end
+
+WeaponPackRuntime.FakeTrade.HandleAcceptClick = function()
+	if #WeaponPackRuntime.FakeTrade.LocalOffer == 0 then
+		return
+	end
+
+	-- The fake other player must accept first.
+	-- After the 6-second cooldown ends, their acceptance happens
+	-- after a randomized 1.0-1.5 second delay.
+	if not WeaponPackRuntime.FakeTrade.OtherAccepted then
+		return
+	end
+
+	if WeaponPackRuntime.FakeTrade.LocalAcceptMode
+			== "Accept"
+		and time()
+			>= WeaponPackRuntime.FakeTrade.CooldownEndsAt then
+
+		WeaponPackRuntime.FakeTrade.LocalConfirmStartedAt =
+			time()
+
+		WeaponPackRuntime.FakeTrade.SetAcceptState(
+			"Confirm"
+		)
+	end
+end
+
+WeaponPackRuntime.FakeTrade.ApplyNativeAcceptVisual = function()
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local actions =
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.Actions
+
+	local accept =
+		actions
+		and actions:FindFirstChild(
+			"Accept"
+		)
+
+	local actionButton =
+		accept
+		and accept:FindFirstChild(
+			"ActionButton"
+		)
+
+	if not actionButton
+		or not actionButton:IsA(
+			"GuiObject"
+		) then
+
+		return
+	end
+
+	-- Cache MM2's untouched native enabled button BEFORE changing anything.
+	-- V23 only cached colors, which meant our fake gray geometry/text styling
+	-- leaked into the green enabled state after the timer ended.
+	if WeaponPackRuntime.FakeTrade.NativeAcceptStyle == nil then
+		WeaponPackRuntime.FakeTrade.NativeAcceptStyle = {
+			Size =
+				actionButton.Size,
+			Position =
+				actionButton.Position,
+			AnchorPoint =
+				actionButton.AnchorPoint,
+			BackgroundColor3 =
+				actionButton.BackgroundColor3,
+			BackgroundTransparency =
+				actionButton.BackgroundTransparency,
+			BorderColor3 =
+				actionButton.BorderColor3,
+			BorderSizePixel =
+				actionButton.BorderSizePixel,
+			ZIndex =
+				actionButton.ZIndex,
+			AutoButtonColor =
+				actionButton:IsA("GuiButton")
+				and actionButton.AutoButtonColor
+				or nil,
+			Text =
+				actionButton:IsA("TextButton")
+				and actionButton.Text
+				or nil,
+			Font =
+				actionButton:IsA("TextButton")
+				and actionButton.Font
+				or nil,
+			TextSize =
+				actionButton:IsA("TextButton")
+				and actionButton.TextSize
+				or nil,
+			TextColor3 =
+				actionButton:IsA("TextButton")
+				and actionButton.TextColor3
+				or nil,
+			TextTransparency =
+				actionButton:IsA("TextButton")
+				and actionButton.TextTransparency
+				or nil,
+			TextStrokeColor3 =
+				actionButton:IsA("TextButton")
+				and actionButton.TextStrokeColor3
+				or nil,
+			TextStrokeTransparency =
+				actionButton:IsA("TextButton")
+				and actionButton.TextStrokeTransparency
+				or nil,
+		}
+
+		WeaponPackRuntime.FakeTrade.NativeAcceptCornerRadii =
+			{}
+
+		for _, child in ipairs(
+			actionButton:GetChildren()
+		) do
+			if child:IsA(
+				"UICorner"
+			) then
+				WeaponPackRuntime.FakeTrade.NativeAcceptCornerRadii[
+					child
+				] =
+					child.CornerRadius
+			end
+		end
+	end
+
+	local hasOffer =
+		#WeaponPackRuntime.FakeTrade.LocalOffer > 0
+
+	local ready =
+		hasOffer
+		and WeaponPackRuntime.FakeTrade.LocalAcceptMode
+			== "Accept"
+		and time()
+			>= WeaponPackRuntime.FakeTrade.CooldownEndsAt
+
+	if ready then
+		-- Restore MM2's REAL enabled Accept button 1:1.
+		-- Do not keep any of the screenshot-matching gray overrides.
+		local nativeStyle =
+			WeaponPackRuntime.FakeTrade.NativeAcceptStyle
+
+		actionButton.Size =
+			nativeStyle.Size
+
+		actionButton.Position =
+			nativeStyle.Position
+
+		actionButton.AnchorPoint =
+			nativeStyle.AnchorPoint
+
+		actionButton.BackgroundColor3 =
+			nativeStyle.BackgroundColor3
+
+		actionButton.BackgroundTransparency =
+			nativeStyle.BackgroundTransparency
+
+		actionButton.BorderColor3 =
+			nativeStyle.BorderColor3
+
+		actionButton.BorderSizePixel =
+			nativeStyle.BorderSizePixel
+
+		actionButton.ZIndex =
+			nativeStyle.ZIndex
+
+		if actionButton:IsA(
+			"GuiButton"
+		)
+			and nativeStyle.AutoButtonColor ~= nil then
+
+			actionButton.AutoButtonColor =
+				nativeStyle.AutoButtonColor
+		end
+
+		if actionButton:IsA(
+			"TextButton"
+		) then
+
+			actionButton.Text =
+				nativeStyle.Text
+
+			actionButton.Font =
+				nativeStyle.Font
+
+			actionButton.TextSize =
+				nativeStyle.TextSize
+
+			actionButton.TextColor3 =
+				nativeStyle.TextColor3
+
+			actionButton.TextTransparency =
+				nativeStyle.TextTransparency
+
+			actionButton.TextStrokeColor3 =
+				nativeStyle.TextStrokeColor3
+
+			actionButton.TextStrokeTransparency =
+				nativeStyle.TextStrokeTransparency
+		end
+
+		for corner, radius in pairs(
+			WeaponPackRuntime.FakeTrade.NativeAcceptCornerRadii
+			or {}
+		) do
+			if corner
+				and corner.Parent == actionButton then
+
+				corner.CornerRadius =
+					radius
+			end
+		end
+
+		return
+	end
+
+	if hasOffer then
+		-- While the 6-second cooldown is active, MM2's Cooldown frame
+		-- is shown instead of ActionButton. Do not restyle the hidden button.
+		return
+	end
+
+	-- Empty-offer disabled state: match the user's supplied gray reference.
+	-- Only this state is customized.
+	actionButton.AnchorPoint =
+		Vector2.new(
+			0.5,
+			0.5
+		)
+
+	actionButton.Position =
+		UDim2.new(
+			0.5,
+			0,
+			0.5,
+			0
+		)
+
+	actionButton.Size =
+		UDim2.new(
+			0,
+			231,
+			0,
+			50
+		)
+
+	actionButton.BackgroundColor3 =
+		Color3.fromRGB(
+			91,
+			91,
+			91
+		)
+
+	actionButton.BackgroundTransparency =
+		0
+
+	actionButton.BorderColor3 =
+		Color3.fromRGB(
+			29,
+			29,
+			29
+		)
+
+	actionButton.BorderSizePixel =
+		3
+
+	if actionButton:IsA(
+		"GuiButton"
+	) then
+		actionButton.AutoButtonColor =
+			false
+	end
+
+	for _, child in ipairs(
+		actionButton:GetChildren()
+	) do
+		if child:IsA(
+			"UICorner"
+		) then
+			child.CornerRadius =
+				UDim.new(
+					0,
+					0
+				)
+		end
+	end
+
+	if actionButton:IsA(
+		"TextButton"
+	) then
+		actionButton.Text =
+			"ACCEPT"
+
+		actionButton.Font =
+			Enum.Font.SourceSansBold
+
+		actionButton.TextSize =
+			31
+
+		actionButton.TextColor3 =
+			Color3.fromRGB(
+				255,
+				255,
+				255
+			)
+
+		actionButton.TextTransparency =
+			0
+
+		actionButton.TextStrokeColor3 =
+			Color3.fromRGB(
+				29,
+				29,
+				29
+			)
+
+		actionButton.TextStrokeTransparency =
+			0.25
+	end
+end
+
+WeaponPackRuntime.FakeTrade.WakeAcceptActionButton = function()
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local actions =
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.Actions
+
+	local accept =
+		actions
+		and actions:FindFirstChild(
+			"Accept"
+		)
+
+	if not accept then
+		return
+	end
+
+	accept.Visible =
+		true
+
+	if accept:FindFirstChild(
+		"Cooldown"
+	)
+		and WeaponPackRuntime.FakeTrade.LocalAcceptMode
+			~= "Cooldown" then
+
+		accept.Cooldown.Visible =
+			false
+	end
+
+	if accept:FindFirstChild(
+		"AddItem"
+	)
+		and WeaponPackRuntime.FakeTrade.LocalAcceptMode
+			~= "Cooldown" then
+
+		accept.AddItem.Visible =
+			false
+	end
+
+	if accept:FindFirstChild(
+		"Confirm"
+	)
+		and WeaponPackRuntime.FakeTrade.LocalAcceptMode
+			~= "Confirm" then
+
+		accept.Confirm.Visible =
+			false
+	end
+
+	if accept:FindFirstChild(
+		"Cancel"
+	)
+		and WeaponPackRuntime.FakeTrade.LocalAcceptMode
+			~= "Waiting"
+		and WeaponPackRuntime.FakeTrade.LocalAcceptMode
+			~= "BothAccepted" then
+
+		accept.Cancel.Visible =
+			false
+	end
+
+	local actionButton =
+		accept:FindFirstChild(
+			"ActionButton"
+		)
+
+	if actionButton
+		and actionButton:IsA(
+			"GuiObject"
+		) then
+
+		actionButton.Visible =
+			true
+
+		WeaponPackRuntime.FakeTrade.ApplyNativeAcceptVisual()
+	end
+
+	if actionButton
+		and actionButton:IsA(
+			"GuiButton"
+		) then
+
+		actionButton.Active =
+			true
+
+		actionButton.Selectable =
+			true
+
+		actionButton.AutoButtonColor =
+			true
+	end
+
+	local containerOverlay =
+		accept:FindFirstChild(
+			"ClientPlaceholderTradeActionOverlay"
+		)
+
+	if not containerOverlay then
+		containerOverlay =
+			Instance.new(
+				"TextButton"
+			)
+
+		containerOverlay.Name =
+			"ClientPlaceholderTradeActionOverlay"
+
+		containerOverlay.BackgroundTransparency =
+			1
+
+		containerOverlay.BorderSizePixel =
+			0
+
+		containerOverlay.Text =
+			""
+
+		containerOverlay.Size =
+			UDim2.fromScale(
+				1,
+				1
+			)
+
+		containerOverlay.Position =
+			UDim2.fromScale(
+				0,
+				0
+			)
+
+		containerOverlay.Parent =
+			accept
+
+		containerOverlay.MouseButton1Click:Connect(function()
+			WeaponPackRuntime.FakeTrade.HandleAcceptClick()
+		end)
+	end
+
+	if containerOverlay:IsA(
+		"GuiObject"
+	) then
+		containerOverlay.Visible =
+			WeaponPackRuntime.FakeTrade.LocalAcceptMode
+				== "Accept"
+
+		containerOverlay.BackgroundTransparency =
+			1
+
+		containerOverlay.ZIndex =
+			accept.ZIndex + 200
+
+		containerOverlay.Size =
+			UDim2.fromScale(
+				1,
+				1
+			)
+
+		containerOverlay.Position =
+			UDim2.fromScale(
+				0,
+				0
+			)
+	end
+
+	if containerOverlay:IsA(
+		"GuiButton"
+	) then
+		containerOverlay.Active =
+			true
+
+		containerOverlay.Selectable =
+			true
+
+		containerOverlay.AutoButtonColor =
+			false
+	end
+
+	local overlay =
+		actionButton
+		and actionButton:FindFirstChild(
+			"ClientPlaceholderTradeActionOverlay"
+		)
+
+	if actionButton
+		and not overlay then
+
+		overlay =
+			Instance.new(
+				"TextButton"
+			)
+
+		overlay.Name =
+			"ClientPlaceholderTradeActionOverlay"
+
+		overlay.BackgroundTransparency =
+			1
+
+		overlay.BorderSizePixel =
+			0
+
+		overlay.Text =
+			""
+
+		overlay.Size =
+			UDim2.fromScale(
+				1,
+				1
+			)
+
+		overlay.Position =
+			UDim2.fromScale(
+				0,
+				0
+			)
+
+		overlay.Parent =
+			actionButton
+
+		overlay.MouseButton1Click:Connect(function()
+			WeaponPackRuntime.FakeTrade.HandleAcceptClick()
+		end)
+	end
+
+	if overlay
+		and overlay:IsA(
+			"GuiObject"
+		) then
+
+		overlay.Visible =
+			WeaponPackRuntime.FakeTrade.LocalAcceptMode
+				== "Accept"
+
+		overlay.BackgroundTransparency =
+			1
+
+		overlay.ZIndex =
+			actionButton.ZIndex + 100
+
+		overlay.Size =
+			UDim2.fromScale(
+				1,
+				1
+			)
+
+		overlay.Position =
+			UDim2.fromScale(
+				0,
+				0
+			)
+	end
+
+	if overlay
+		and overlay:IsA(
+			"GuiButton"
+		) then
+
+		overlay.Active =
+			true
+
+		overlay.Selectable =
+			true
+
+		overlay.AutoButtonColor =
+			false
+	end
+end
+
+WeaponPackRuntime.FakeTrade.ResetAcceptUi = function()
+	WeaponPackRuntime.FakeTrade.CooldownSequence += 1
+	WeaponPackRuntime.FakeTrade.OtherAcceptSequence += 1
+	WeaponPackRuntime.FakeTrade.OtherAccepted =
+		false
+	WeaponPackRuntime.FakeTrade.CooldownEndsAt =
+		0
+
+	WeaponPackRuntime.FakeTrade.LocalConfirmStartedAt =
+		0
+
+	WeaponPackRuntime.FakeTrade.SetAcceptState(
+		"Accept"
+	)
+
+	WeaponPackRuntime.FakeTrade.WakeAcceptActionButton()
+
+	task.defer(
+		WeaponPackRuntime.FakeTrade.WakeAcceptActionButton
+	)
+
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local actions =
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.Actions
+
+	if actions
+		and actions:FindFirstChild(
+			"oldconfirm"
+		) then
+
+		actions.oldconfirm.Visible =
+			false
+	end
+end
+
+WeaponPackRuntime.FakeTrade.StartAcceptCooldown = function(seconds)
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local actions =
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.Actions
+
+	local accept =
+		actions
+		and actions:FindFirstChild(
+			"Accept"
+		)
+
+	local cooldown =
+		accept
+		and accept:FindFirstChild(
+			"Cooldown"
+		)
+
+	local title =
+		cooldown
+		and cooldown:FindFirstChild(
+			"Title"
+		)
+
+	if not cooldown then
+		return
+	end
+
+	WeaponPackRuntime.FakeTrade.CooldownSequence += 1
+
+	local sequence =
+		WeaponPackRuntime.FakeTrade.CooldownSequence
+
+	WeaponPackRuntime.FakeTrade.CooldownEndsAt =
+		time()
+		+ seconds
+
+	WeaponPackRuntime.FakeTrade.LocalAcceptMode =
+		"Cooldown"
+
+	if accept:FindFirstChild(
+		"Confirm"
+	) then
+		accept.Confirm.Visible =
+			false
+	end
+
+	if accept:FindFirstChild(
+		"Cancel"
+	) then
+		accept.Cancel.Visible =
+			false
+	end
+
+	if tradeModule.GUI.YourOffer
+		and tradeModule.GUI.YourOffer:FindFirstChild(
+			"Accepted"
+		) then
+
+		tradeModule.GUI.YourOffer.Accepted.Visible =
+			false
+	end
+
+	cooldown.Visible =
+		true
+
+	if accept:FindFirstChild(
+		"ActionButton"
+	)
+		and accept.ActionButton:IsA(
+			"GuiObject"
+		) then
+
+		accept.ActionButton.Visible =
+			false
+	end
+
+	WeaponPackRuntime.FakeTrade.SetAcceptContainerOverlayVisible(
+		false
+	)
+
+	task.spawn(function()
+		while sequence
+			== WeaponPackRuntime.FakeTrade.CooldownSequence do
+
+			local remaining =
+				math.max(
+					0,
+					math.ceil(
+						WeaponPackRuntime.FakeTrade.CooldownEndsAt
+						- time()
+					)
+				)
+
+			if title then
+				title.Text =
+					("Please wait (%d) before accepting."):format(
+						remaining
+					)
+			end
+
+			if remaining <= 0 then
+				break
+			end
+
+			task.wait(
+				0.2
+			)
+		end
+
+		if sequence
+			== WeaponPackRuntime.FakeTrade.CooldownSequence
+			and WeaponPackRuntime.FakeTrade.Active then
+
+			WeaponPackRuntime.FakeTrade.CooldownEndsAt =
+				0
+
+			WeaponPackRuntime.FakeTrade.SetAcceptState(
+				"Accept"
+			)
+
+			-- Cooldown is finished. Make the fake other player
+			-- accept first after a randomized 1.0-1.5 second delay.
+			WeaponPackRuntime.FakeTrade.OtherAccepted =
+				false
+
+			WeaponPackRuntime.FakeTrade.WakeAcceptActionButton()
+
+			local otherSequence =
+				WeaponPackRuntime.FakeTrade.OtherAcceptSequence
+
+			task.delay(
+				math.random(
+					10,
+					15
+				) / 10,
+				function()
+					if otherSequence
+							~= WeaponPackRuntime.FakeTrade.OtherAcceptSequence
+						or not WeaponPackRuntime.FakeTrade.Active
+						or WeaponPackRuntime.FakeTrade.LocalAcceptMode
+							~= "Accept"
+						or #WeaponPackRuntime.FakeTrade.LocalOffer == 0 then
+
+						return
+					end
+
+					WeaponPackRuntime.FakeTrade.OtherAccepted =
+						true
+
+					if WeaponPackRuntime.FakeTrade.TradeModule
+						and WeaponPackRuntime.FakeTrade.TradeModule.GUI
+						and WeaponPackRuntime.FakeTrade.TradeModule.GUI.TheirOffer
+						and WeaponPackRuntime.FakeTrade.TradeModule.GUI.TheirOffer:FindFirstChild(
+							"Accepted"
+						) then
+
+						WeaponPackRuntime.FakeTrade.TradeModule.GUI.TheirOffer.Accepted.Visible =
+							true
+					end
+				end
+			)
+			WeaponPackRuntime.FakeTrade.ApplyNativeAcceptVisual()
+
+			-- Re-apply once on the next frame as MM2 may update the
+			-- same ActionButton immediately after the cooldown ends.
+			task.defer(function()
+				if WeaponPackRuntime.FakeTrade.Active
+					and WeaponPackRuntime.FakeTrade.LocalAcceptMode
+						== "Accept" then
+
+					WeaponPackRuntime.FakeTrade.WakeAcceptActionButton()
+					WeaponPackRuntime.FakeTrade.ApplyNativeAcceptVisual()
+				end
+			end)
+		end
+	end)
+end
+
+WeaponPackRuntime.FakeTrade.InstallOfferRemoveButtons = function()
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local yourOffer =
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.YourOffer
+
+	if not yourOffer
+		or not yourOffer:FindFirstChild(
+			"Container"
+		) then
+
+		return
+	end
+
+	for index = 1, 4 do
+		local slot =
+			yourOffer.Container:FindFirstChild(
+				"NewItem" .. index
+			)
+
+		if slot then
+			local oldOverlay =
+				slot:FindFirstChild(
+					"ClientPlaceholderTradeRemove"
+				)
+
+			if oldOverlay then
+				oldOverlay:Destroy()
+			end
+
+			if WeaponPackRuntime.FakeTrade.LocalOffer[
+				index
+			] then
+
+				local overlay =
+					Instance.new(
+						"TextButton"
+					)
+
+				overlay.Name =
+					"ClientPlaceholderTradeRemove"
+
+				overlay.BackgroundTransparency =
+					1
+
+				overlay.BorderSizePixel =
+					0
+
+				overlay.Text =
+					""
+
+				overlay.Size =
+					UDim2.fromScale(
+						1,
+						1
+					)
+
+				overlay.Position =
+					UDim2.fromScale(
+						0,
+						0
+					)
+
+				overlay.ZIndex =
+					slot.ZIndex + 50
+
+				overlay.Parent =
+					slot
+
+				overlay.MouseButton1Click:Connect(function()
+					local removed =
+						table.remove(
+							WeaponPackRuntime.FakeTrade.LocalOffer,
+							index
+						)
+
+					if removed then
+						WeaponPackRuntime.FakeTrade.ApplyInventoryDelta(
+							removed.ItemID,
+							removed.ItemType,
+							removed.Amount or 1
+						)
+					end
+
+					WeaponPackRuntime.FakeTrade.RedrawLocalTrade()
+				end)
+			end
+		end
+	end
+end
+
+WeaponPackRuntime.FakeTrade.RedrawLocalTrade = function()
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	if not tradeModule
+		or not tradeModule.GUI then
+
+		return
+	end
+
+	WeaponPackRuntime.FakeTrade.DrawOfferSlots(
+		tradeModule.GUI.YourOffer,
+		WeaponPackRuntime.FakeTrade.LocalOffer
+	)
+
+	WeaponPackRuntime.FakeTrade.DrawOfferSlots(
+		tradeModule.GUI.TheirOffer,
+		WeaponPackRuntime.FakeTrade.TheirOffer
+	)
+
+	WeaponPackRuntime.FakeTrade.ResetAcceptUi()
+
+	if tradeModule.GUI.TheirOffer
+		and tradeModule.GUI.TheirOffer:FindFirstChild(
+			"Username"
+		) then
+
+		tradeModule.GUI.TheirOffer.Username.Text =
+			"("
+			.. tostring(
+				WeaponPackRuntime.FakeTrade.CurrentFakeName
+			)
+			.. ")"
+	end
+
+	WeaponPackRuntime.FakeTrade.InstallOfferRemoveButtons()
+end
+
+WeaponPackRuntime.FakeTrade.ToggleLocalOffer = function(itemId, itemType)
+	if not WeaponPackRuntime.FakeTrade.CanTradeItem(
+		itemId,
+		itemType
+	) then
+
+		return
+	end
+
+	for _, offer in ipairs(
+		WeaponPackRuntime.FakeTrade.LocalOffer
+	) do
+		if offer.ItemID == itemId
+			and offer.ItemType == itemType then
+
+			offer.Amount =
+				(tonumber(offer.Amount) or 1)
+				+ 1
+
+			WeaponPackRuntime.FakeTrade.ApplyInventoryDelta(
+				itemId,
+				itemType,
+				-1
+			)
+
+			WeaponPackRuntime.FakeTrade.RedrawLocalTrade()
+
+			WeaponPackRuntime.FakeTrade.StartAcceptCooldown(
+				6
+			)
+
+			return
+		end
+	end
+
+	if #WeaponPackRuntime.FakeTrade.LocalOffer >= 4 then
+		return
+	end
+
+	table.insert(
+		WeaponPackRuntime.FakeTrade.LocalOffer,
+		{
+			ItemID = itemId,
+			Amount = 1,
+			ItemType = itemType,
+		}
+	)
+
+	WeaponPackRuntime.FakeTrade.ApplyInventoryDelta(
+		itemId,
+		itemType,
+		-1
+	)
+
+	WeaponPackRuntime.FakeTrade.RedrawLocalTrade()
+
+	WeaponPackRuntime.FakeTrade.StartAcceptCooldown(
+		6
+	)
+end
+
+WeaponPackRuntime.FakeTrade.AddOverlayClickTarget = function(parent, itemId, itemType)
+	if not parent
+		or not parent:IsA(
+			"GuiObject"
+		) then
+
+		return
+	end
+
+	local oldOverlay =
+		parent:FindFirstChild(
+			"ClientPlaceholderTradeToggle"
+		)
+
+	if oldOverlay then
+		oldOverlay:Destroy()
+	end
+
+	local overlay =
+		Instance.new(
+			"TextButton"
+		)
+
+	overlay.Name =
+		"ClientPlaceholderTradeToggle"
+
+	overlay.BackgroundTransparency =
+		1
+
+	overlay.BorderSizePixel =
+		0
+
+	overlay.Text =
+		""
+
+	overlay.Size =
+		UDim2.fromScale(
+			1,
+			1
+		)
+
+	overlay.Position =
+		UDim2.fromScale(
+			0,
+			0
+		)
+
+	overlay.ZIndex =
+		parent.ZIndex + 100
+
+	overlay.Parent =
+		parent
+
+	overlay.MouseButton1Click:Connect(function()
+		WeaponPackRuntime.FakeTrade.ToggleLocalOffer(
+			itemId,
+			itemType
+		)
+	end)
+end
+
+WeaponPackRuntime.FakeTrade.AddActionOverlay = function(parent, callback)
+	if not parent
+		or not parent:IsA(
+			"GuiObject"
+		) then
+
+		return
+	end
+
+	local oldOverlay =
+		parent:FindFirstChild(
+			"ClientPlaceholderTradeActionOverlay"
+		)
+
+	if oldOverlay then
+		oldOverlay:Destroy()
+	end
+
+	local overlay =
+		Instance.new(
+			"TextButton"
+		)
+
+	overlay.Name =
+		"ClientPlaceholderTradeActionOverlay"
+
+	overlay.BackgroundTransparency =
+		1
+
+	overlay.BorderSizePixel =
+		0
+
+	overlay.Text =
+		""
+
+	overlay.Size =
+		UDim2.fromScale(
+			1,
+			1
+		)
+
+	overlay.Position =
+		UDim2.fromScale(
+			0,
+			0
+		)
+
+	overlay.ZIndex =
+		parent.ZIndex + 100
+
+	overlay.Parent =
+		parent
+
+	overlay.MouseButton1Click:Connect(
+		callback
+	)
+end
+
+WeaponPackRuntime.FakeTrade.ScheduleOtherSideAccept = function()
+	WeaponPackRuntime.FakeTrade.OtherAcceptSequence += 1
+
+	local sequence =
+		WeaponPackRuntime.FakeTrade.OtherAcceptSequence
+
+	if WeaponPackRuntime.FakeTrade.OtherAccepted then
+		WeaponPackRuntime.FakeTrade.SetAcceptState(
+			"BothAccepted"
+		)
+
+		task.delay(
+			1,
+			function()
+				if sequence
+						~= WeaponPackRuntime.FakeTrade.OtherAcceptSequence
+					or WeaponPackRuntime.FakeTrade.LocalAcceptMode
+						~= "BothAccepted"
+					or not WeaponPackRuntime.FakeTrade.Active then
+
+					return
+				end
+
+				WeaponPackRuntime.FakeTrade.CompleteTrade()
+			end
+		)
+
+		return
+	end
+
+	-- Fallback only: if another code path reaches this before their
+	-- accepted state exists, keep the old one-second fake accept behavior.
+	task.delay(
+		1,
+		function()
+			if sequence
+					~= WeaponPackRuntime.FakeTrade.OtherAcceptSequence
+				or WeaponPackRuntime.FakeTrade.LocalAcceptMode
+					~= "Waiting"
+				or not WeaponPackRuntime.FakeTrade.Active then
+
+				return
+			end
+
+			WeaponPackRuntime.FakeTrade.OtherAccepted =
+				true
+
+			local tradeModule =
+				WeaponPackRuntime.FakeTrade.TradeModule
+
+			if tradeModule
+				and tradeModule.GUI
+				and tradeModule.GUI.TheirOffer
+				and tradeModule.GUI.TheirOffer:FindFirstChild(
+					"Accepted"
+				) then
+
+				tradeModule.GUI.TheirOffer.Accepted.Visible =
+					true
+			end
+
+			WeaponPackRuntime.FakeTrade.SetAcceptState(
+				"BothAccepted"
+			)
+
+			task.delay(
+				1,
+				function()
+					if sequence
+							~= WeaponPackRuntime.FakeTrade.OtherAcceptSequence
+						or WeaponPackRuntime.FakeTrade.LocalAcceptMode
+							~= "BothAccepted"
+						or not WeaponPackRuntime.FakeTrade.Active then
+
+						return
+					end
+
+					WeaponPackRuntime.FakeTrade.CompleteTrade()
+				end
+			)
+		end
+	)
+end
+
+WeaponPackRuntime.FakeTrade.InstallTradeActionButtons = function()
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local actions =
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.Actions
+
+	if not actions then
+		return
+	end
+
+	local accept =
+		actions:FindFirstChild(
+			"Accept"
+		)
+
+	local decline =
+		actions:FindFirstChild(
+			"Decline"
+		)
+
+	if accept then
+		WeaponPackRuntime.FakeTrade.AddActionOverlay(
+			accept,
+			WeaponPackRuntime.FakeTrade.HandleAcceptClick
+		)
+
+		WeaponPackRuntime.FakeTrade.AddActionOverlay(
+			accept:FindFirstChild(
+				"ActionButton"
+			),
+			WeaponPackRuntime.FakeTrade.HandleAcceptClick
+		)
+
+		local confirmButton =
+			accept:FindFirstChild(
+				"Confirm"
+			)
+			and accept.Confirm:FindFirstChild(
+				"ActionButton"
+			)
+
+		WeaponPackRuntime.FakeTrade.AddActionOverlay(
+			confirmButton,
+			function()
+				if WeaponPackRuntime.FakeTrade.LocalAcceptMode
+						== "Confirm"
+					and time()
+						- WeaponPackRuntime.FakeTrade.LocalConfirmStartedAt
+						>= 0.4 then
+
+					WeaponPackRuntime.FakeTrade.SetAcceptState(
+						"Waiting"
+					)
+
+					WeaponPackRuntime.FakeTrade.ScheduleOtherSideAccept()
+				end
+			end
+		)
+
+		local cancelButton =
+			accept:FindFirstChild(
+				"Cancel"
+			)
+			and accept.Cancel:FindFirstChild(
+				"ActionButton"
+			)
+
+		WeaponPackRuntime.FakeTrade.AddActionOverlay(
+			cancelButton,
+			WeaponPackRuntime.FakeTrade.ResetAcceptUi
+		)
+	end
+
+	if decline then
+		WeaponPackRuntime.FakeTrade.AddActionOverlay(
+			decline:FindFirstChild(
+				"ActionButton"
+			),
+			function()
+				WeaponPackRuntime.FakeTrade.Close(
+					true
+				)
+
+				if WeaponPackRuntime.FakeTrade.Enabled then
+					WeaponPackRuntime.FakeTrade.ScheduleNextTrade()
+				end
+			end
+		)
+	end
+end
+
+WeaponPackRuntime.FakeTrade.InstallInventoryToggleButtons = function()
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local tradeInventory =
+		tradeModule
+		and tradeModule.TradeInventory
+
+	if not tradeInventory
+		or not tradeInventory.Data then
+
+		return
+	end
+
+	for itemType, categories in pairs(
+		tradeInventory.Data
+	) do
+		for _, items in pairs(
+			categories
+		) do
+			for itemId, entry in pairs(
+				items
+			) do
+				local frame =
+					entry.Frame
+
+				local actionButton =
+					frame
+					and frame:FindFirstChild(
+						"Container"
+					)
+					and frame.Container:FindFirstChild(
+						"ActionButton"
+					)
+
+				if actionButton
+					and actionButton:IsA(
+						"GuiObject"
+					) then
+
+					WeaponPackRuntime.FakeTrade.AddOverlayClickTarget(
+						actionButton,
+						itemId,
+						itemType
+					)
+
+				elseif frame
+					and frame:IsA(
+						"GuiObject"
+					) then
+
+					WeaponPackRuntime.FakeTrade.AddOverlayClickTarget(
+						frame,
+						itemId,
+						itemType
+					)
+				end
+			end
+		end
+	end
+end
+
+WeaponPackRuntime.FakeTrade.InstallSearchFilter = function()
+	if WeaponPackRuntime.FakeTrade.SearchConnection then
+		pcall(function()
+			WeaponPackRuntime.FakeTrade.SearchConnection:Disconnect()
+		end)
+
+		WeaponPackRuntime.FakeTrade.SearchConnection =
+			nil
+	end
+
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local searchText =
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.TradeGUI
+		and tradeModule.GUI.TradeGUI:FindFirstChild(
+			"Container"
+		)
+		and tradeModule.GUI.TradeGUI.Container:FindFirstChild(
+			"Items"
+		)
+		and tradeModule.GUI.TradeGUI.Container.Items:FindFirstChild(
+			"Tabs"
+		)
+		and tradeModule.GUI.TradeGUI.Container.Items.Tabs:FindFirstChild(
+			"Search"
+		)
+		and tradeModule.GUI.TradeGUI.Container.Items.Tabs.Search:FindFirstChild(
+			"Container"
+		)
+		and tradeModule.GUI.TradeGUI.Container.Items.Tabs.Search.Container:FindFirstChild(
+			"SearchText"
+		)
+
+	if not searchText
+		or not searchText:IsA(
+			"TextBox"
+		) then
+
+		return
+	end
+
+	local function applyFilter()
+		local inventory =
+			tradeModule.TradeInventory
+
+		if not inventory
+			or not inventory.Data then
+
+			return
+		end
+
+		local query =
+			tostring(
+				searchText.Text or ""
+			):lower()
+
+		for _, itemTypeData in pairs(
+			inventory.Data
+		) do
+			for _, entry in pairs(
+				itemTypeData.Current or {}
+			) do
+				if entry.Frame then
+					local itemName =
+						tostring(
+							entry.Name or ""
+						):lower()
+
+					entry.Frame.Visible =
+						query == ""
+						or itemName:find(
+							query,
+							1,
+							true
+						) ~= nil
+				end
+			end
+		end
+	end
+
+	WeaponPackRuntime.FakeTrade.SearchConnection =
+		searchText:GetPropertyChangedSignal(
+			"Text"
+		):Connect(
+			applyFilter
+		)
+
+	applyFilter()
+end
+
+WeaponPackRuntime.FakeTrade.EnforceFrame = function()
+	if not WeaponPackRuntime.FakeTrade.Active then
+		return
+	end
+
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local tradeGui =
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.TradeGUI
+
+	if not tradeGui then
+		return
+	end
+
+	if not tradeGui.Enabled then
+		tradeGui.Enabled =
+			true
+	end
+
+	if tradeGui:FindFirstChild(
+		"Container"
+	) then
+		tradeGui.Container.Visible =
+			true
+	end
+
+	if WeaponPackRuntime.FakeTrade.LocalAcceptMode
+			== "Waiting"
+		or WeaponPackRuntime.FakeTrade.LocalAcceptMode
+			== "BothAccepted" then
+
+		return
+	end
+
+	WeaponPackRuntime.FakeTrade.DrawOfferSlots(
+		tradeModule.GUI.YourOffer,
+		WeaponPackRuntime.FakeTrade.LocalOffer
+	)
+
+	WeaponPackRuntime.FakeTrade.DrawOfferSlots(
+		tradeModule.GUI.TheirOffer,
+		WeaponPackRuntime.FakeTrade.TheirOffer
+	)
+
+	if tradeModule.GUI.TheirOffer
+		and tradeModule.GUI.TheirOffer:FindFirstChild(
+			"Username"
+		) then
+
+		tradeModule.GUI.TheirOffer.Username.Text =
+			"("
+			.. tostring(
+				WeaponPackRuntime.FakeTrade.CurrentFakeName
+			)
+			.. ")"
+	end
+
+	WeaponPackRuntime.FakeTrade.InstallOfferRemoveButtons()
+
+	if WeaponPackRuntime.FakeTrade.LocalAcceptMode
+		== "Accept" then
+
+		WeaponPackRuntime.FakeTrade.WakeAcceptActionButton()
+	else
+		WeaponPackRuntime.FakeTrade.SetAcceptContainerOverlayVisible(
+			false
+		)
+	end
+end
+
+WeaponPackRuntime.FakeTrade.StartGuard = function()
+	WeaponPackRuntime.FakeTrade.GuardSequence += 1
+
+	local sequence =
+		WeaponPackRuntime.FakeTrade.GuardSequence
+
+	for _, connection in ipairs(
+		WeaponPackRuntime.FakeTrade.GuardConnections
+	) do
+		pcall(function()
+			connection:Disconnect()
+		end)
+	end
+
+	table.clear(
+		WeaponPackRuntime.FakeTrade.GuardConnections
+	)
+
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local tradeGui =
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.TradeGUI
+
+	if tradeGui then
+		table.insert(
+			WeaponPackRuntime.FakeTrade.GuardConnections,
+			tradeGui:GetPropertyChangedSignal(
+				"Enabled"
+			):Connect(function()
+				if WeaponPackRuntime.FakeTrade.Active then
+					task.defer(
+						WeaponPackRuntime.FakeTrade.EnforceFrame
+					)
+				end
+			end)
+		)
+
+		if tradeGui:FindFirstChild(
+			"Container"
+		) then
+			table.insert(
+				WeaponPackRuntime.FakeTrade.GuardConnections,
+				tradeGui.Container:GetPropertyChangedSignal(
+					"Visible"
+				):Connect(function()
+					if WeaponPackRuntime.FakeTrade.Active then
+						task.defer(
+							WeaponPackRuntime.FakeTrade.EnforceFrame
+						)
+					end
+				end)
+			)
+		end
+	end
+
+	task.spawn(function()
+		while WeaponPackRuntime.FakeTrade.Active
+			and sequence
+				== WeaponPackRuntime.FakeTrade.GuardSequence do
+
+			WeaponPackRuntime.FakeTrade.EnforceFrame()
+
+			task.wait(
+				0.08
+			)
+		end
+	end)
+end
+
+WeaponPackRuntime.FakeTrade.StopGuard = function()
+	WeaponPackRuntime.FakeTrade.GuardSequence += 1
+
+	for _, connection in ipairs(
+		WeaponPackRuntime.FakeTrade.GuardConnections
+	) do
+		pcall(function()
+			connection:Disconnect()
+		end)
+	end
+
+	table.clear(
+		WeaponPackRuntime.FakeTrade.GuardConnections
+	)
+
+	if WeaponPackRuntime.FakeTrade.SearchConnection then
+		pcall(function()
+			WeaponPackRuntime.FakeTrade.SearchConnection:Disconnect()
+		end)
+
+		WeaponPackRuntime.FakeTrade.SearchConnection =
+			nil
+	end
+end
+
+WeaponPackRuntime.FakeTrade.ScheduleNextTrade = function()
+	WeaponPackRuntime.FakeTrade.ReopenSequence =
+		(WeaponPackRuntime.FakeTrade.ReopenSequence or 0)
+		+ 1
+
+	local sequence =
+		WeaponPackRuntime.FakeTrade.ReopenSequence
+
+	task.delay(
+		2,
+		function()
+			if sequence
+					~= WeaponPackRuntime.FakeTrade.ReopenSequence
+				or not WeaponPackRuntime.FakeTrade.Enabled
+				or WeaponPackRuntime.FakeTrade.Active
+				or not WeaponPackRuntime.ControllerUI
+				or not WeaponPackRuntime.ControllerUI.AutoTradeButton
+				or not WeaponPackRuntime.ControllerUI.AutoTradeButton.Parent then
+
+				return
+			end
+
+			WeaponPackRuntime.FakeTrade.Open()
+		end
+	)
+end
+
+WeaponPackRuntime.FakeTrade.Close = function(restoreOffer)
+	if not WeaponPackRuntime.FakeTrade.ModulesLoaded then
+		return
+	end
+
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local tradeGui =
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.TradeGUI
+
+	if restoreOffer then
+		WeaponPackRuntime.FakeTrade.RestoreLocalOffer()
+	end
+
+	WeaponPackRuntime.FakeTrade.Active =
+		false
+
+	WeaponPackRuntime.FakeTrade.OtherAcceptSequence += 1
+	WeaponPackRuntime.FakeTrade.CooldownSequence += 1
+
+	WeaponPackRuntime.FakeTrade.StopGuard()
+
+	if tradeGui then
+		tradeGui.Enabled =
+			false
+	end
+
+	WeaponPackRuntime.FakeTrade.CleanupOverlays()
+
+	if tradeModule then
+		tradeModule.TradeInventory =
+			nil
+	end
+
+	table.clear(
+		WeaponPackRuntime.FakeTrade.LocalOffer
+	)
+
+	table.clear(
+		WeaponPackRuntime.FakeTrade.TheirOffer
+	)
+
+	WeaponPackRuntime.FakeTrade.LocalAcceptMode =
+		"Accept"
+
+	WeaponPackRuntime.FakeTrade.LocalConfirmStartedAt =
+		0
+
+	WeaponPackRuntime.FakeTrade.OtherAccepted =
+		false
+
+	WeaponPackRuntime.FakeTrade.ClearOfferSlots(
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.YourOffer
+	)
+
+	WeaponPackRuntime.FakeTrade.ClearOfferSlots(
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.TheirOffer
+	)
+end
+
+WeaponPackRuntime.FakeTrade.CompleteTrade = function()
+	if not WeaponPackRuntime.FakeTrade.Active then
+		return
+	end
+
+	-- Completed fake trade: keep AUTO TRADE ON and reopen after 2 seconds.
+	WeaponPackRuntime.FakeTrade.Close(
+		false
+	)
+
+	if WeaponPackRuntime.RealisticSpawner
+		and WeaponPackRuntime.RealisticSpawner.RefreshMainInventoryNow then
+
+		task.defer(
+			WeaponPackRuntime.RealisticSpawner.RefreshMainInventoryNow
+		)
+	end
+
+	WeaponPackRuntime.FakeTrade.ScheduleNextTrade()
+end
+
+WeaponPackRuntime.FakeTrade.Open = function()
+	if WeaponPackRuntime.FakeTrade.Active then
+		return true
+	end
+
+	if not WeaponPackRuntime.FakeTrade.LoadModules() then
+		return false
+	end
+
+	local tradeModule =
+		WeaponPackRuntime.FakeTrade.TradeModule
+
+	local inventoryModule =
+		WeaponPackRuntime.FakeTrade.InventoryModule
+
+	local profileData =
+		WeaponPackRuntime.FakeTrade.ProfileData
+
+	local tradeGui =
+		tradeModule
+		and tradeModule.GUI
+		and tradeModule.GUI.TradeGUI
+
+	local tradeContainer =
+		tradeGui
+		and tradeGui:FindFirstChild(
+			"Container"
+		)
+
+	if not tradeGui
+		or not tradeContainer
+		or not tradeContainer:FindFirstChild(
+			"Items"
+		)
+		or not tradeContainer.Items:FindFirstChild(
+			"Main"
+		) then
+
+		warn(
+			"[BAP Trade] MM2 trade GUI is not ready."
+		)
+
+		return false
+	end
+
+	WeaponPackRuntime.FakeTrade.CleanupOverlays()
+
+	WeaponPackRuntime.FakeTrade.Active =
+		true
+
+	WeaponPackRuntime.FakeTrade.PickFakeName()
+
+	WeaponPackRuntime.FakeTrade.RestoreLocalOffer()
+
+	table.clear(
+		WeaponPackRuntime.FakeTrade.TheirOffer
+	)
+
+	WeaponPackRuntime.FakeTrade.ResetAcceptUi()
+
+	for _, categoryName in ipairs({
+		"Weapons",
+		"Pets",
+	}) do
+		local category =
+			tradeContainer.Items.Main:FindFirstChild(
+				categoryName
+			)
+
+		if category
+			and category:FindFirstChild(
+				"Items"
+			)
+			and category.Items:FindFirstChild(
+				"Container"
+			) then
+
+			for _, section in ipairs(
+				category.Items.Container:GetChildren()
+			) do
+				local container =
+					section:FindFirstChild(
+						"Container"
+					)
+
+				if container then
+					container:ClearAllChildren()
+				end
+			end
+		end
+	end
+
+	local okInventory, generatedInventory =
+		pcall(function()
+			return inventoryModule.GenerateInventory(
+				tradeContainer.Items,
+				profileData,
+				"Trading",
+				tradeModule.GUI.ItemsLayout
+			)
+		end)
+
+	if not okInventory
+		or type(generatedInventory) ~= "table" then
+
+		WeaponPackRuntime.FakeTrade.Active =
+			false
+
+		warn(
+			"[BAP Trade] Could not generate MM2 trade inventory: "
+			.. tostring(
+				generatedInventory
+			)
+		)
+
+		return false
+	end
+
+	tradeModule.TradeInventory =
+		generatedInventory
+
+	pcall(function()
+		tradeModule.ConnectOfferButtons(
+			tradeModule.TradeInventory
+		)
+	end)
+
+	WeaponPackRuntime.FakeTrade.InstallSearchFilter()
+
+	WeaponPackRuntime.FakeTrade.RedrawLocalTrade()
+
+	if tradeModule.GUI.TheirOffer
+		and tradeModule.GUI.TheirOffer:FindFirstChild(
+			"Username"
+		) then
+
+		tradeModule.GUI.TheirOffer.Username.Text =
+			"("
+			.. tostring(
+				WeaponPackRuntime.FakeTrade.CurrentFakeName
+			)
+			.. ")"
+	end
+
+	tradeGui.Enabled =
+		true
+
+	task.defer(
+		WeaponPackRuntime.FakeTrade.InstallInventoryToggleButtons
+	)
+
+	task.delay(
+		0.5,
+		WeaponPackRuntime.FakeTrade.InstallInventoryToggleButtons
+	)
+
+	WeaponPackRuntime.FakeTrade.InstallTradeActionButtons()
+
+	WeaponPackRuntime.FakeTrade.WakeAcceptActionButton()
+
+	WeaponPackRuntime.FakeTrade.EnforceFrame()
+
+	task.defer(
+		WeaponPackRuntime.FakeTrade.WakeAcceptActionButton
+	)
+
+	task.defer(
+		WeaponPackRuntime.FakeTrade.EnforceFrame
+	)
+
+	WeaponPackRuntime.FakeTrade.StartGuard()
+
+	return true
+end
+
+WeaponPackRuntime.FakeTrade.SetEnabled = function(enabled)
+	WeaponPackRuntime.FakeTrade.Enabled =
+		enabled == true
+
+	if not WeaponPackRuntime.FakeTrade.Enabled then
+		WeaponPackRuntime.FakeTrade.ReopenSequence =
+			(WeaponPackRuntime.FakeTrade.ReopenSequence or 0)
+			+ 1
+	end
+
+	WeaponPackRuntime.ControllerUI.AutoTradeEnabled =
+		WeaponPackRuntime.FakeTrade.Enabled
+
+	WeaponPackRuntime.ControllerUI.AutoTradeButton.Text =
+		WeaponPackRuntime.FakeTrade.Enabled
+		and "ON"
+		or "OFF"
+
+	if WeaponPackRuntime.FakeTrade.Enabled then
+		task.defer(function()
+			if WeaponPackRuntime.FakeTrade.Enabled then
+				WeaponPackRuntime.FakeTrade.Open()
+			end
+		end)
+
+		return
+	end
+
+	if WeaponPackRuntime.FakeTrade.Active then
+		WeaponPackRuntime.FakeTrade.Close(
+			true
+		)
+	end
+end
+
+WeaponPackRuntime.ControllerUI.AutoTradeButton.MouseButton1Click:Connect(function()
+	WeaponPackRuntime.FakeTrade.SetEnabled(
+		not WeaponPackRuntime.FakeTrade.Enabled
+	)
+end)
+
+WeaponPackRuntime.ControllerUI.RealisticSpawnerButton = createButton(
+	"REALISTIC SPAWNER",
+	UDim2.new(0, 6, 0, 48),
+	UDim2.new(0, 300, 0, 56),
+	WeaponPackRuntime.ControllerUI.SpawnerTradePage
+)
+WeaponPackRuntime.ControllerUI.RealisticSpawnerButton.AnchorPoint = Vector2.new(0, 0)
+WeaponPackRuntime.ControllerUI.RealisticSpawnerButton.TextSize = 16
+WeaponPackRuntime.ControllerUI.AutoTradeButton.TextSize = 16
+
+--------------------------------------------------
+-- REALISTIC SPAWNER
+-- Uses MM2's normal inventory UI and client-side fake inventory amounts.
+-- Each supported weapon gets its configured realistic amount.
+--------------------------------------------------
+
+WeaponPackRuntime.RealisticSpawner = WeaponPackRuntime.RealisticSpawner or {}
+WeaponPackRuntime.RealisticSpawner.FakeInventoryAmounts =
+	WeaponPackRuntime.RealisticSpawner.FakeInventoryAmounts or {}
+
+WeaponPackRuntime.RealisticSpawner.GetProfileOwnedTable = function(itemType)
+	if itemType == "Weapons" or itemType == "Item" then
+		return WeaponPackRuntime.RealisticSpawner.ProfileData
+			and WeaponPackRuntime.RealisticSpawner.ProfileData.Weapons
+			and WeaponPackRuntime.RealisticSpawner.ProfileData.Weapons.Owned
+	elseif itemType == "Pets" then
+		return WeaponPackRuntime.RealisticSpawner.ProfileData
+			and WeaponPackRuntime.RealisticSpawner.ProfileData.Pets
+			and WeaponPackRuntime.RealisticSpawner.ProfileData.Pets.Owned
+	end
+
+	local bucket =
+		WeaponPackRuntime.RealisticSpawner.ProfileData
+		and WeaponPackRuntime.RealisticSpawner.ProfileData[itemType]
+
+	return bucket and bucket.Owned
+end
+
+WeaponPackRuntime.RealisticSpawner.GetFakeInventoryKey = function(itemId, itemType)
+	local bucket =
+		itemType == "Item"
+		and "Weapons"
+		or tostring(itemType)
+
+	return bucket .. ":" .. tostring(itemId)
+end
+
+WeaponPackRuntime.RealisticSpawner.GetFakeInventoryAmount = function(itemId, itemType)
+	return tonumber(
+		WeaponPackRuntime.RealisticSpawner.FakeInventoryAmounts[
+			WeaponPackRuntime.RealisticSpawner.GetFakeInventoryKey(
+				itemId,
+				itemType
+			)
+		]
+	) or 0
+end
+
+WeaponPackRuntime.RealisticSpawner.SetFakeInventoryAmount = function(itemId, itemType, amount)
+	local key =
+		WeaponPackRuntime.RealisticSpawner.GetFakeInventoryKey(
+			itemId,
+			itemType
+		)
+
+	local owned =
+		WeaponPackRuntime.RealisticSpawner.GetProfileOwnedTable(
+			itemType
+		)
+
+	amount =
+		math.max(
+			0,
+			math.floor(
+				tonumber(amount) or 0
+			)
+		)
+
+	if amount > 0 then
+		WeaponPackRuntime.RealisticSpawner.FakeInventoryAmounts[
+			key
+		] = amount
+
+		if owned then
+			owned[itemId] = amount
+		end
+	else
+		WeaponPackRuntime.RealisticSpawner.FakeInventoryAmounts[
+			key
+		] = nil
+
+		if owned then
+			owned[itemId] = nil
+		end
+	end
+
+	return amount
+end
+
+WeaponPackRuntime.RealisticSpawner.AddFakeInventoryAmount = function(itemId, itemType, delta)
+	return WeaponPackRuntime.RealisticSpawner.SetFakeInventoryAmount(
+		itemId,
+		itemType,
+		WeaponPackRuntime.RealisticSpawner.GetFakeInventoryAmount(
+			itemId,
+			itemType
+		) + (tonumber(delta) or 0)
+	)
+end
+
+WeaponPackRuntime.RealisticSpawner.ClearMainInventoryContainers = function()
+	local inventoryModule =
+		WeaponPackRuntime.RealisticSpawner.InventoryModule
+
+	local inventoryGui =
+		inventoryModule
+		and inventoryModule.GUI
+		and inventoryModule.GUI.MyInventory
+
+	if not inventoryGui
+		or not inventoryGui.Main then
+
+		return false
+	end
+
+	local okBlank, blank =
+		pcall(function()
+			return inventoryModule.CreateBlankInventoryTable()
+		end)
+
+	if not okBlank
+		or type(blank) ~= "table" then
+
+		return false
+	end
+
+	for itemType, categories in pairs(blank) do
+		local typeFrame =
+			inventoryGui.Main:FindFirstChild(
+				itemType
+			)
+
+		local itemsContainer =
+			typeFrame
+			and typeFrame:FindFirstChild("Items")
+			and typeFrame.Items:FindFirstChild("Container")
+
+		if itemsContainer then
+			for categoryName in pairs(categories) do
+				local categoryFrame =
+					itemsContainer:FindFirstChild(
+						categoryName
+					)
+
+				if not categoryFrame
+					and itemsContainer:FindFirstChild("Holiday") then
+
+					local holiday =
+						itemsContainer.Holiday:FindFirstChild(
+							"Container"
+						)
+
+					categoryFrame =
+						holiday
+						and holiday:FindFirstChild(
+							categoryName
+						)
+				end
+
+				local container =
+					categoryFrame
+					and categoryFrame:FindFirstChild(
+						"Container"
+					)
+
+				if container then
+					container:ClearAllChildren()
+				end
+			end
+		end
+	end
+
+	return true
+end
+
+WeaponPackRuntime.RealisticSpawner.RefreshMainInventoryNow = function()
+	local inventoryModule =
+		WeaponPackRuntime.RealisticSpawner.InventoryModule
+
+	local profileData =
+		WeaponPackRuntime.RealisticSpawner.ProfileData
+
+	local inventoryGui =
+		inventoryModule
+		and inventoryModule.GUI
+		and inventoryModule.GUI.MyInventory
+
+	if not inventoryGui
+		or not inventoryGui.Main then
+
+		return false
+	end
+
+	if not WeaponPackRuntime.RealisticSpawner.ClearMainInventoryContainers() then
+		return false
+	end
+
+	local ok, newInventory =
+		pcall(function()
+			return inventoryModule.GenerateInventory(
+				inventoryGui,
+				profileData
+			)
+		end)
+
+	if not ok then
+		warn(
+			"[BAP Spawner] Main inventory refresh failed: "
+			.. tostring(newInventory)
+		)
+
+		return false
+	end
+
+	inventoryModule.MyInventory =
+		newInventory
+
+	pcall(function()
+		inventoryModule.ConnectEquipButtons()
+	end)
+
+	pcall(function()
+		inventoryModule.UpdateMyEquip()
+	end)
+
+	return true
+end
+
+WeaponPackRuntime.RealisticSpawner.LoadModules = function()
+	if WeaponPackRuntime.RealisticSpawner.ModulesLoaded then
+		return true
+	end
+
+	local modules =
+		ReplicatedStorage:FindFirstChild(
+			"Modules"
+		)
+
+	local database =
+		ReplicatedStorage:FindFirstChild(
+			"Database"
+		)
+
+	if not modules
+		or not database then
+
+		return false
+	end
+
+	local okInventory, inventoryModule =
+		pcall(function()
+			return require(
+				modules:WaitForChild(
+					"InventoryModule",
+					5
+				)
+			)
+		end)
+
+	local okProfile, profileData =
+		pcall(function()
+			return require(
+				modules:WaitForChild(
+					"ProfileData",
+					5
+				)
+			)
+		end)
+
+	local okSync, sync =
+		pcall(function()
+			return require(
+				database:WaitForChild(
+					"Sync",
+					5
+				)
+			)
+		end)
+
+	if not okInventory
+		or type(inventoryModule) ~= "table"
+		or not okProfile
+		or type(profileData) ~= "table"
+		or not okSync
+		or type(sync) ~= "table" then
+
+		warn(
+			"[BAP Spawner] Could not load MM2 inventory modules."
+		)
+
+		return false
+	end
+
+	WeaponPackRuntime.RealisticSpawner.InventoryModule =
+		inventoryModule
+
+	WeaponPackRuntime.RealisticSpawner.ProfileData =
+		profileData
+
+	WeaponPackRuntime.RealisticSpawner.Sync =
+		sync
+
+	WeaponPackRuntime.RealisticSpawner.ModulesLoaded =
+		true
+
+	return true
+end
+
+WeaponPackRuntime.RealisticSpawner.IsSpawnerRarity = function(data)
+	return type(data) == "table"
+		and (
+			data.Rarity == "Godly"
+			or data.Rarity == "Ancient"
+		)
+end
+
+-- Keep the realistic spawner from adding the unwanted/placeholder cards.
+-- The Evo weapons shown by the user are specifically their GODLY variants;
+-- Ancient/other variants with the same display name are intentionally kept.
+WeaponPackRuntime.RealisticSpawner.NormalizeItemText = function(value)
+	return tostring(value or "")
+		:lower()
+		:gsub("[^%w%?]", "")
+end
+
+WeaponPackRuntime.RealisticSpawner.IsExcludedItem = function(itemId, data)
+	if type(data) ~= "table" then
+		return false
+	end
+
+	local idText =
+		WeaponPackRuntime.RealisticSpawner.NormalizeItemText(
+			itemId
+		)
+
+	local nameText =
+		WeaponPackRuntime.RealisticSpawner.NormalizeItemText(
+			data.ItemName
+			or data.Name
+			or ""
+		)
+
+	-- Keep the two black placeholder ??? cards out.
+	if idText == "???"
+		or nameText == "???"
+		or idText == "chroma???"
+		or nameText == "chroma???" then
+
+		return true
+	end
+
+	-- Keep Nik's Scythe out.
+	if idText == "niksscythe"
+		or nameText == "niksscythe" then
+
+		return true
+	end
+
+	-- Keep the same pictured Godly/Evo variants deleted as before.
+	-- Other variants with the same display name are still allowed.
+	if data.Rarity == "Godly" then
+		if nameText == "synthwave"
+			or nameText == "reaver"
+			or nameText == "icecrusher"
+			or nameText == "gingerscythe" then
+
+			return true
+		end
+	end
+
+	return false
+end
+
+WeaponPackRuntime.RealisticSpawner.IsChromaItem = function(itemId, data)
+	if type(data) ~= "table" then
+		return false
+	end
+
+	if data.Chroma == true
+		or data.IsChroma == true then
+
+		return true
+	end
+
+	local idText =
+		WeaponPackRuntime.RealisticSpawner.NormalizeItemText(
+			itemId
+		)
+
+	local nameText =
+		WeaponPackRuntime.RealisticSpawner.NormalizeItemText(
+			data.ItemName
+			or data.Name
+			or data.DisplayName
+			or ""
+		)
+
+	return string.sub(idText, 1, 6) == "chroma"
+		or string.sub(nameText, 1, 6) == "chroma"
+end
+
+WeaponPackRuntime.RealisticSpawner.MatchesItemName = function(itemId, data, aliases)
+	if type(data) ~= "table" then
+		return false
+	end
+
+	local candidates = {
+		itemId,
+		data.ItemName,
+		data.Name,
+		data.DisplayName,
+		data.WeaponName,
+	}
+
+	for _, candidate in ipairs(candidates) do
+		local normalized =
+			WeaponPackRuntime.RealisticSpawner.NormalizeItemText(
+				candidate
+			)
+
+		-- Chroma records often share the same display ItemName as the
+		-- normal weapon, but this also handles names with "Chroma" prefixed.
+		if string.sub(normalized, 1, 6) == "chroma" then
+			normalized =
+				string.sub(
+					normalized,
+					7
+				)
+		end
+
+		for _, alias in ipairs(aliases) do
+			if normalized == alias then
+				return true
+			end
+		end
+	end
+
+	return false
+end
+
+WeaponPackRuntime.RealisticSpawner.GetSpawnAmount = function(itemId, data)
+	local chroma =
+		WeaponPackRuntime.RealisticSpawner.IsChromaItem(
+			itemId,
+			data
+		)
+
+	local matches =
+		WeaponPackRuntime.RealisticSpawner.MatchesItemName
+
+	-- The specifically deleted Godly/Evo variants are filtered above.
+	-- Whatever variants of these four remain in the list should be exactly 1.
+	if matches(itemId, data, {"synthwave"})
+		or matches(itemId, data, {"gingerscythe"})
+		or matches(itemId, data, {"icecrusher"})
+		or matches(itemId, data, {"reaver"}) then
+
+		return 1
+	end
+
+	if matches(
+		itemId,
+		data,
+		{
+			"travelersgun",
+			"travellersgun",
+			"travelergun",
+			"travellergun",
+		}
+	) then
+		if chroma then
+			return 3
+		end
+
+		return math.random(25, 38)
+	end
+
+	if matches(
+		itemId,
+		data,
+		{
+			"vampiregun",
+			"vampiresgun",
+		}
+	) then
+		if chroma then
+			return math.random(24, 33)
+		end
+
+		return math.random(48, 63)
+	end
+
+	if matches(itemId, data, {"evergreen"}) then
+		if chroma then
+			return math.random(4, 7)
+		end
+
+		return math.random(43, 52)
+	end
+
+	if matches(itemId, data, {"evergun"}) then
+		if chroma then
+			return math.random(4, 7)
+		end
+
+		return math.random(42, 55)
+	end
+
+	if matches(
+		itemId,
+		data,
+		{
+			"gingerscope",
+			"gingerscope",
+		}
+	) then
+
+		return math.random(42, 53)
+	end
+
+	if chroma
+		and matches(itemId, data, {"sunrise"}) then
+
+		return math.random(52, 56)
+	end
+
+	if chroma
+		and matches(itemId, data, {"sunset"}) then
+
+		return math.random(52, 56)
+	end
+
+	if chroma
+		and matches(
+			itemId,
+			data,
+			{
+				"raygun",
+				"raygun",
+			}
+		) then
+
+		return math.random(37, 44)
+	end
+
+	if chroma
+		and matches(itemId, data, {"alienbeam"}) then
+
+		return math.random(36, 43)
+	end
+
+	if chroma
+		and matches(
+			itemId,
+			data,
+			{
+				"heartwand",
+			}
+		) then
+
+		return math.random(56, 67)
+	end
+
+	if chroma
+		and matches(itemId, data, {"sands"}) then
+
+		return math.random(74, 87)
+	end
+
+	if chroma
+		and matches(itemId, data, {"beachy"}) then
+
+		return math.random(73, 86)
+	end
+
+	if chroma
+		and matches(itemId, data, {"constellation"}) then
+
+		return math.random(37, 44)
+	end
+
+	-- Everything else.
+	return math.random(78, 127)
+end
+
+WeaponPackRuntime.RealisticSpawner.PurgeExcludedTrackedItems = function()
+	local sync =
+		WeaponPackRuntime.RealisticSpawner.Sync
+
+	if type(sync) ~= "table" then
+		return false
+	end
+
+	local changed = false
+
+	for key, fakeAmount in pairs(
+		WeaponPackRuntime.RealisticSpawner.FakeInventoryAmounts
+	) do
+		local itemType, itemId =
+			string.match(
+				tostring(key),
+				"^([^:]+):(.+)$"
+			)
+
+		local data =
+			itemId
+			and (
+				(type(sync.Weapons) == "table" and sync.Weapons[itemId])
+				or (type(sync.Item) == "table" and sync.Item[itemId])
+			)
+
+		if itemId
+			and WeaponPackRuntime.RealisticSpawner.IsExcludedItem(
+				itemId,
+				data
+			) then
+
+			WeaponPackRuntime.RealisticSpawner.FakeInventoryAmounts[key] = nil
+
+			local owned =
+				WeaponPackRuntime.RealisticSpawner.GetProfileOwnedTable(
+					itemType
+				)
+
+			-- Only clear the client entry when it still equals the amount
+			-- this spawner itself injected. No server inventory is touched.
+			if owned
+				and tonumber(owned[itemId]) == tonumber(fakeAmount) then
+
+				owned[itemId] = nil
+			end
+
+			changed = true
+		end
+	end
+
+	return changed
+end
+
+WeaponPackRuntime.RealisticSpawner.SpawnAll = function()
+	if not WeaponPackRuntime.RealisticSpawner.LoadModules() then
+		return 0
+	end
+
+	local sync =
+		WeaponPackRuntime.RealisticSpawner.Sync
+
+	WeaponPackRuntime.RealisticSpawner.PurgeExcludedTrackedItems()
+
+	local spawnedCount = 0
+	local seen = {}
+
+	local function collect(container, itemType)
+		for itemId, data in pairs(container or {}) do
+			if WeaponPackRuntime.RealisticSpawner.IsSpawnerRarity(data)
+				and not WeaponPackRuntime.RealisticSpawner.IsExcludedItem(
+					itemId,
+					data
+				)
+				and not seen[itemId] then
+
+				seen[itemId] = true
+
+				if WeaponPackRuntime.RealisticSpawner.GetProfileOwnedTable(
+					itemType
+				) then
+					local amount =
+						WeaponPackRuntime.RealisticSpawner.GetSpawnAmount(
+							itemId,
+							data
+						)
+
+					WeaponPackRuntime.RealisticSpawner.SetFakeInventoryAmount(
+						itemId,
+						itemType,
+						amount
+					)
+
+					spawnedCount += 1
+				end
+			end
+		end
+	end
+
+	collect(
+		sync.Weapons,
+		"Weapons"
+	)
+
+	collect(
+		sync.Item,
+		"Item"
+	)
+
+	WeaponPackRuntime.RealisticSpawner.RefreshMainInventoryNow()
+
+	print(
+		("[BAP Spawner] Assigned realistic amounts to %d weapons"):format(
+			spawnedCount
+		)
+	)
+
+	return spawnedCount
+end
+
+WeaponPackRuntime.RealisticSpawner.WatchId =
+	(WeaponPackRuntime.RealisticSpawner.WatchId or 0) + 1
+
+WeaponPackRuntime.RealisticSpawner.StartWatcher = function()
+	local watchId =
+		WeaponPackRuntime.RealisticSpawner.WatchId
+
+	task.spawn(function()
+		while WeaponPackRuntime.RealisticSpawner
+			and WeaponPackRuntime.RealisticSpawner.WatchId == watchId do
+
+			if WeaponPackRuntime.RealisticSpawner.ModulesLoaded then
+				local corrected = false
+
+				for key, amount in pairs(
+					WeaponPackRuntime.RealisticSpawner.FakeInventoryAmounts
+				) do
+					local itemType, itemId =
+						string.match(
+							key,
+							"^([^:]+):(.+)$"
+						)
+
+					local owned =
+						itemType
+						and WeaponPackRuntime.RealisticSpawner.GetProfileOwnedTable(
+							itemType
+						)
+
+					if owned
+						and tonumber(owned[itemId]) ~= tonumber(amount) then
+
+						owned[itemId] = amount
+						corrected = true
+					end
+				end
+
+				if corrected then
+					WeaponPackRuntime.RealisticSpawner.RefreshMainInventoryNow()
+				end
+			end
+
+			task.wait(0.35)
+		end
+	end)
+end
+
+WeaponPackRuntime.RealisticSpawner.StartWatcher()
+
+WeaponPackRuntime.ControllerUI.RealisticSpawnerButton.MouseButton1Click:Connect(function()
+	WeaponPackRuntime.ControllerUI.RealisticSpawnerButton.Text =
+		"SPAWNING..."
+
+	local count =
+		WeaponPackRuntime.RealisticSpawner.SpawnAll()
+
+	if count > 0 then
+		WeaponPackRuntime.ControllerUI.RealisticSpawnerButton.Text =
+			"SPAWNED "
+			.. tostring(count)
+			.. " ITEMS"
+	else
+		WeaponPackRuntime.ControllerUI.RealisticSpawnerButton.Text =
+			"SPAWNER FAILED"
+	end
+
+	task.delay(2, function()
+		if WeaponPackRuntime.ControllerUI
+			and WeaponPackRuntime.ControllerUI.RealisticSpawnerButton
+			and WeaponPackRuntime.ControllerUI.RealisticSpawnerButton.Parent then
+
+			WeaponPackRuntime.ControllerUI.RealisticSpawnerButton.Text =
+				"REALISTIC SPAWNER"
+		end
+	end)
 end)
 
 setActiveTab("BOTS")
@@ -2568,11 +7043,15 @@ end)
 WeaponPackRuntime.ControllerUI.SetCollapsed = function(collapsed)
     WeaponPackRuntime.ControllerUI.Collapsed = collapsed
     if collapsed then
-        WeaponPackRuntime.ControllerUI.LastTab = weaponsPage.Visible and "WEAPONS" or "BOTS"
+        WeaponPackRuntime.ControllerUI.LastTab = WeaponPackRuntime.ControllerUI.TradePage.Visible and "TRADE" or (WeaponPackRuntime.ControllerUI.SpawnerPage.Visible and "SPAWNER" or (WeaponPackRuntime.ControllerUI.SpawnerTradePage.Visible and "SPAWNER_TRADE" or (weaponsPage.Visible and "WEAPONS" or "BOTS")))
         botsTabButton.Visible = false
         weaponsTabButton.Visible = false
+        WeaponPackRuntime.ControllerUI.SpawnerTradeTabButton.Visible = false
         botsPage.Visible = false
         weaponsPage.Visible = false
+        WeaponPackRuntime.ControllerUI.SpawnerTradePage.Visible = false
+        WeaponPackRuntime.ControllerUI.SpawnerPage.Visible = false
+        WeaponPackRuntime.ControllerUI.TradePage.Visible = false
         leftThorn.Visible = false
         rightThorn.Visible = false
         main.Size = UDim2.new(0, 360, 0, 88)
@@ -2581,6 +7060,7 @@ WeaponPackRuntime.ControllerUI.SetCollapsed = function(collapsed)
         main.Size = UDim2.new(0, 360, 0, 540)
         botsTabButton.Visible = true
         weaponsTabButton.Visible = true
+        WeaponPackRuntime.ControllerUI.SpawnerTradeTabButton.Visible = true
         leftThorn.Visible = true
         rightThorn.Visible = true
         setActiveTab(WeaponPackRuntime.ControllerUI.LastTab)
@@ -2650,7 +7130,7 @@ local addAvatarLabel = Instance.new("TextLabel")
 addAvatarLabel.Size = UDim2.new(1, 0, 0, 20)
 addAvatarLabel.Position = UDim2.new(0, 0, 0, 92)
 addAvatarLabel.BackgroundTransparency = 1
-addAvatarLabel.Text = "ADD AVATAR"
+addAvatarLabel.Text = "SPAWN AVATAR"
 addAvatarLabel.TextColor3 = Color3.new(1, 1, 1)
 addAvatarLabel.TextSize = 14
 addAvatarLabel.Font = Enum.Font.GothamSemibold
@@ -2660,10 +7140,10 @@ addAvatarLabel.Parent = botsPage
 local addAvatarBox = Instance.new("TextBox")
 addAvatarBox.Size = UDim2.new(1, -80, 0, 36)
 addAvatarBox.Position = UDim2.new(0, 0, 0, 116)
-addAvatarBox.BackgroundColor3 = Color3.fromRGB(38, 38, 47)
+addAvatarBox.BackgroundColor3 = Color3.fromRGB(15, 8, 11)
 addAvatarBox.BorderSizePixel = 0
 addAvatarBox.TextColor3 = Color3.new(1, 1, 1)
-addAvatarBox.PlaceholderColor3 = Color3.fromRGB(145, 145, 155)
+addAvatarBox.PlaceholderColor3 = Color3.fromRGB(135, 88, 96)
 addAvatarBox.PlaceholderText = "Username or user ID"
 addAvatarBox.Text = ""
 addAvatarBox.TextSize = 14
@@ -2678,11 +7158,17 @@ addAvatarPadding.PaddingRight = UDim.new(0, 10)
 addAvatarPadding.Parent = addAvatarBox
 
 local addAvatarCorner = Instance.new("UICorner")
-addAvatarCorner.CornerRadius = UDim.new(0, 9)
+addAvatarCorner.CornerRadius = UDim.new(0, 3)
 addAvatarCorner.Parent = addAvatarBox
 
+WeaponPackRuntime.ControllerUI.AddAvatarStroke = Instance.new("UIStroke")
+WeaponPackRuntime.ControllerUI.AddAvatarStroke.Color = Color3.fromRGB(92, 6, 19)
+WeaponPackRuntime.ControllerUI.AddAvatarStroke.Thickness = 1
+WeaponPackRuntime.ControllerUI.AddAvatarStroke.Transparency = 0.12
+WeaponPackRuntime.ControllerUI.AddAvatarStroke.Parent = addAvatarBox
+
 local addAvatarButton = createButton(
-	"ADD",
+	"SPAWN",
 	UDim2.new(1, -68, 0, 116),
 	UDim2.new(0, 68, 0, 36),
 	botsPage
@@ -2693,7 +7179,7 @@ addAvatarStatus.Size = UDim2.new(1, 0, 0, 18)
 addAvatarStatus.Position = UDim2.new(0, 0, 0, 156)
 addAvatarStatus.BackgroundTransparency = 1
 addAvatarStatus.Text = ""
-addAvatarStatus.TextColor3 = Color3.fromRGB(170, 170, 180)
+addAvatarStatus.TextColor3 = Color3.fromRGB(164, 105, 115)
 addAvatarStatus.TextSize = 12
 addAvatarStatus.Font = Enum.Font.Gotham
 addAvatarStatus.TextXAlignment = Enum.TextXAlignment.Left
@@ -2738,10 +7224,10 @@ weaponLabel.Parent = weaponsPage
 local weaponBox = Instance.new("TextBox")
 weaponBox.Size = UDim2.new(1, -80, 0, 38)
 weaponBox.Position = UDim2.new(0, 0, 0, 32)
-weaponBox.BackgroundColor3 = Color3.fromRGB(38, 38, 47)
+weaponBox.BackgroundColor3 = Color3.fromRGB(15, 8, 11)
 weaponBox.BorderSizePixel = 0
 weaponBox.TextColor3 = Color3.new(1, 1, 1)
-weaponBox.PlaceholderColor3 = Color3.fromRGB(145, 145, 155)
+weaponBox.PlaceholderColor3 = Color3.fromRGB(135, 88, 96)
 weaponBox.PlaceholderText = "Weapon name"
 weaponBox.Text = ""
 weaponBox.TextSize = 14
@@ -2756,8 +7242,14 @@ weaponPadding.PaddingRight = UDim.new(0, 10)
 weaponPadding.Parent = weaponBox
 
 local weaponCorner = Instance.new("UICorner")
-weaponCorner.CornerRadius = UDim.new(0, 9)
+weaponCorner.CornerRadius = UDim.new(0, 3)
 weaponCorner.Parent = weaponBox
+
+WeaponPackRuntime.ControllerUI.WeaponBoxStroke = Instance.new("UIStroke")
+WeaponPackRuntime.ControllerUI.WeaponBoxStroke.Color = Color3.fromRGB(92, 6, 19)
+WeaponPackRuntime.ControllerUI.WeaponBoxStroke.Thickness = 1
+WeaponPackRuntime.ControllerUI.WeaponBoxStroke.Transparency = 0.12
+WeaponPackRuntime.ControllerUI.WeaponBoxStroke.Parent = weaponBox
 
 local equipWeaponButton = createButton(
 	"EQUIP",
@@ -2773,12 +7265,26 @@ local removeWeaponButton = createButton(
 	weaponsPage
 )
 
+-- Clean WEP EQUIP layout: hide the old manual name/equip/remove controls.
+-- They remain instantiated only so existing internal references stay safe.
+weaponLabel.Visible = false
+weaponBox.Visible = false
+equipWeaponButton.Visible = false
+removeWeaponButton.Text = "REMOVE"
+removeWeaponButton.Size = UDim2.new(0, 90, 0, 30)
+removeWeaponButton.Position = UDim2.new(1, -90, 0, 24)
+removeWeaponButton.Visible = true
+removeWeaponButton.Active = true
+
+weaponBox.Active = false
+equipWeaponButton.Active = false
+
 local weaponStatus = Instance.new("TextLabel")
 weaponStatus.Size = UDim2.new(1, 0, 0, 20)
-weaponStatus.Position = UDim2.new(0, 0, 0, 130)
+weaponStatus.Position = UDim2.new(0, 0, 0, 0)
 weaponStatus.BackgroundTransparency = 1
 weaponStatus.Text = "Choose a configured weapon"
-weaponStatus.TextColor3 = Color3.fromRGB(170, 170, 180)
+weaponStatus.TextColor3 = Color3.fromRGB(164, 105, 115)
 weaponStatus.TextSize = 12
 weaponStatus.Font = Enum.Font.Gotham
 weaponStatus.TextXAlignment = Enum.TextXAlignment.Left
@@ -2786,7 +7292,7 @@ weaponStatus.Parent = weaponsPage
 
 local weaponListTitle = Instance.new("TextLabel")
 weaponListTitle.Size = UDim2.new(1, 0, 0, 22)
-weaponListTitle.Position = UDim2.new(0, 0, 0, 158)
+weaponListTitle.Position = UDim2.new(0, 0, 0, 28)
 weaponListTitle.BackgroundTransparency = 1
 weaponListTitle.Text = "WEAPON LIST"
 weaponListTitle.TextColor3 = Color3.new(1, 1, 1)
@@ -2799,24 +7305,25 @@ WeaponPackRuntime.SelectedWeaponCategory = "Gun"
 
 WeaponPackRuntime.GunTabButton = createButton(
 	"GUN",
-	UDim2.new(0, 0, 0, 188),
+	UDim2.new(0, 0, 0, 58),
 	UDim2.new(0, 150, 0, 34),
 	weaponsPage
 )
 
 WeaponPackRuntime.KnifeTabButton = createButton(
 	"KNIFE",
-	UDim2.new(0, 162, 0, 188),
+	UDim2.new(0, 162, 0, 58),
 	UDim2.new(0, 150, 0, 34),
 	weaponsPage
 )
 
 local weaponListFrame = Instance.new("ScrollingFrame")
-weaponListFrame.Size = UDim2.new(1, 0, 0, 150)
-weaponListFrame.Position = UDim2.new(0, 0, 0, 230)
-weaponListFrame.BackgroundColor3 = Color3.fromRGB(31, 31, 38)
+weaponListFrame.Size = UDim2.new(1, 0, 0, 200)
+weaponListFrame.Position = UDim2.new(0, 0, 0, 100)
+weaponListFrame.BackgroundColor3 = Color3.fromRGB(10, 5, 8)
 weaponListFrame.BorderSizePixel = 0
 weaponListFrame.ScrollBarThickness = 5
+weaponListFrame.ScrollBarImageColor3 = Color3.fromRGB(126, 8, 25)
 weaponListFrame.CanvasSize = UDim2.new(0,0,0,0)
 weaponListFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
 weaponListFrame.ScrollingDirection = Enum.ScrollingDirection.Y
@@ -2824,7 +7331,7 @@ weaponListFrame.ElasticBehavior = Enum.ElasticBehavior.WhenScrollable
 weaponListFrame.Parent = weaponsPage
 
 local weaponListCorner = Instance.new("UICorner")
-weaponListCorner.CornerRadius = UDim.new(0, 10)
+weaponListCorner.CornerRadius = UDim.new(0, 4)
 weaponListCorner.Parent = weaponListFrame
 
 local weaponLayout = Instance.new("UIListLayout")
@@ -2864,7 +7371,10 @@ local function rebuildWeaponButtons()
 				or "Knife"
 			)
 
-		if weaponType
+		if not WeaponPackRuntime.PLAYER_WEAPON_EQUIP_DISABLED[
+			weaponName
+		]
+			and weaponType
 			== WeaponPackRuntime.SelectedWeaponCategory then
 
 			local button = createButton(
@@ -3071,6 +7581,26 @@ local function prepareWeaponVisual(
 	return model
 end
 
+-- Gingerscope uses a UGC fallback mesh whose local axes are different
+-- from MM2 Harvester/Icepiercer. Keep its correction separate so tuning it
+-- never changes the working guns.
+local GINGERSCOPE_HIP_OFFSET =
+	-- Rotation is already correct. This offset only moves the gun
+	-- off the middle of the avatar and onto the right hip.
+	CFrame.new(0.72, 0.02, 0.28)
+	* CFrame.Angles(
+		math.rad(90),
+		math.rad(0),
+		math.rad(90)
+	)
+
+-- IMPORTANT: every Gingerscope visual path must use THIS function.
+-- This prevents the gun from jumping to a different orientation when
+-- MM2 deletes the round-owned gun and the persistent backup takes over.
+local function getGingerscopeWorldCFrame(targetWorldCFrame)
+	return targetWorldCFrame * GINGERSCOPE_HIP_OFFSET
+end
+
 local WEAPON_HOLSTER_DATA = {
 	["Harvester"] = {
 		Placement = "WaistRight",
@@ -3228,10 +7758,29 @@ local function isInsideScriptedWeapon(instance)
 	local current = instance
 
 	while current do
+		-- A knife that THIS script has replaced is not an "original MM2 knife"
+		-- anymore. Keep it visible when Gingerscope hides the real MM2 weapons.
+		local replacementName =
+			current:GetAttribute(
+				"BotControllerWeaponReplacement"
+			)
+
+		if WeaponPackRuntime.selectedKnifeName
+			and replacementName == WeaponPackRuntime.selectedKnifeName
+			and WeaponPackRuntime.WEAPON_TYPE_HINTS[
+				replacementName
+			] == "Knife" then
+
+			return true
+		end
+
 		if current.Name == "HolsteredWeapon"
 			or current.Name == "HolsteredGun"
 			or current.Name == "HolsteredKnife"
-			or current.Name == "PersistentGunFallback" then
+			or current.Name == "PersistentGunFallback"
+			or current.Name == "PersistentGingerscopeAccessory"
+			or current:GetAttribute("ScriptOwnedWeapon") == true
+			or current:GetAttribute("BotControllerNativeGingerscope") == true then
 
 			return true
 		end
@@ -3590,12 +8139,51 @@ local function hideOriginalWeaponPart(part)
 	end
 end
 
+function WeaponPackRuntime.isCharacterBodyPart(
+	part,
+	character
+)
+	if not part
+		or not character
+		or not part:IsA("BasePart")
+		or part.Parent ~= character then
+
+		return false
+	end
+
+	local name =
+		part.Name
+
+	return
+		name == "Head"
+		or name == "HumanoidRootPart"
+		or name == "UpperTorso"
+		or name == "LowerTorso"
+		or name == "Torso"
+		or name == "LeftUpperArm"
+		or name == "LeftLowerArm"
+		or name == "LeftHand"
+		or name == "RightUpperArm"
+		or name == "RightLowerArm"
+		or name == "RightHand"
+		or name == "LeftUpperLeg"
+		or name == "LeftLowerLeg"
+		or name == "LeftFoot"
+		or name == "RightUpperLeg"
+		or name == "RightLowerLeg"
+		or name == "RightFoot"
+		or name == "Left Arm"
+		or name == "Right Arm"
+		or name == "Left Leg"
+		or name == "Right Leg"
+end
+
 local function isOriginalWeaponPart(part, character)
 	if not part
 		or not part:IsA("BasePart")
 		or not character
 		or isInsideScriptedWeapon(part)
-		or isCharacterBodyPart(part, character)
+		or WeaponPackRuntime.isCharacterBodyPart(part, character)
 		or isSafeAvatarAccessory(part) then
 
 		return false
@@ -3685,7 +8273,7 @@ local function hideConnectedOriginalWeaponParts(character)
 					if part
 						and part:IsA("BasePart")
 						and not isInsideScriptedWeapon(part)
-						and not isCharacterBodyPart(part, character)
+						and not WeaponPackRuntime.isCharacterBodyPart(part, character)
 						and not isSafeAvatarAccessory(part) then
 
 						hideOriginalWeaponPart(part)
@@ -3708,6 +8296,281 @@ local function removeOriginalWeaponDisplays(character)
 	-- Hide only non-body weapon/display geometry.
 	hideCharacterOriginalWeaponParts(character)
 	hideConnectedOriginalWeaponParts(character)
+end
+
+
+-- Gingerscope uses its own visible native waist accessory.
+-- Hide ALL original MM2 weapon geometry (gun + knife) while preserving
+-- normal avatar body parts/accessories. This uses the script's mature
+-- original-weapon detector instead of relying on container names.
+WeaponPackRuntime.GINGERSCOPE_HIDDEN_PART_STATE =
+	WeaponPackRuntime.GINGERSCOPE_HIDDEN_PART_STATE
+	or setmetatable(
+		{},
+		{__mode = "k"}
+	)
+
+function WeaponPackRuntime.hardHideGingerscopeOriginalPart(
+	part
+)
+	if not part
+		or not part.Parent
+		or not part:IsA("BasePart")
+		or isInsideScriptedWeapon(part) then
+
+		return
+	end
+
+	local state =
+		WeaponPackRuntime.GINGERSCOPE_HIDDEN_PART_STATE[
+			part
+		]
+
+	if not state then
+		state = {
+			Transparency =
+				part.Transparency,
+		}
+
+		WeaponPackRuntime.GINGERSCOPE_HIDDEN_PART_STATE[
+			part
+		] = state
+	end
+
+	pcall(function()
+		part.LocalTransparencyModifier = 1
+		part.Transparency = 1
+	end)
+
+	for _, object in ipairs(
+		part:GetDescendants()
+	) do
+		if object:IsA("Decal")
+			or object:IsA("Texture") then
+
+			pcall(function()
+				object.Transparency = 1
+			end)
+
+		elseif object:IsA("ParticleEmitter")
+			or object:IsA("Trail")
+			or object:IsA("Beam")
+			or object:IsA("Smoke")
+			or object:IsA("Fire")
+			or object:IsA("Sparkles") then
+
+			pcall(function()
+				object.Enabled = false
+			end)
+		end
+	end
+end
+
+function WeaponPackRuntime.restoreGingerscopeHardHiddenParts()
+	for part, state in pairs(
+		WeaponPackRuntime.GINGERSCOPE_HIDDEN_PART_STATE
+	) do
+		if part
+			and part.Parent then
+
+			pcall(function()
+				part.LocalTransparencyModifier = 0
+				part.Transparency =
+					state.Transparency
+					or 0
+			end)
+		end
+	end
+
+	WeaponPackRuntime.GINGERSCOPE_HIDDEN_PART_STATE =
+		setmetatable(
+			{},
+			{__mode = "k"}
+		)
+end
+
+function WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+	character
+)
+	if not character
+		or not character.Parent then
+
+		return
+	end
+
+	-- Keep normal avatar cosmetics visible.
+	restoreSafeAvatarAccessoryVisuals(
+		character
+	)
+
+	-- 1) Character descendants.
+	for _, object in ipairs(
+		character:GetDescendants()
+	) do
+		if object:IsA("BasePart")
+			and not WeaponPackRuntime.isCharacterBodyPart(
+				object,
+				character
+			)
+			and not isInsideScriptedWeapon(object) then
+
+			local tool =
+				object:FindFirstAncestorOfClass(
+					"Tool"
+				)
+
+			local definitelyWeapon =
+				isOriginalWeaponPart(
+					object,
+					character
+				)
+				or isKnownMM2WeaponMesh(
+					object
+				)
+				or (
+					tool
+					and tool:IsDescendantOf(
+						character
+					)
+				)
+
+			if definitelyWeapon then
+				WeaponPackRuntime.hardHideGingerscopeOriginalPart(
+					object
+				)
+			end
+		end
+	end
+
+	-- 2) Parts physically welded/connected to the avatar, even when MM2
+	-- parents the round-start gun outside Character.
+	for _, bodyPart in ipairs(
+		character:GetChildren()
+	) do
+		if bodyPart:IsA("BasePart")
+			and BODY_PART_NAMES[
+				bodyPart.Name
+			] then
+
+			local ok, connected =
+				pcall(function()
+					return bodyPart:GetConnectedParts(
+						true
+					)
+				end)
+
+			if ok
+				and connected then
+
+				for _, part in ipairs(
+					connected
+				) do
+					if part
+						and part:IsA("BasePart")
+						and not WeaponPackRuntime.isCharacterBodyPart(
+							part,
+							character
+						)
+						and not isInsideScriptedWeapon(
+							part
+						) then
+
+						local lowerName =
+							string.lower(
+								tostring(
+									part.Name
+								)
+							)
+
+						local parentName =
+							string.lower(
+								tostring(
+									part.Parent
+									and part.Parent.Name
+									or ""
+								)
+							)
+
+						local weaponLike =
+							isKnownMM2WeaponMesh(
+								part
+							)
+							or nameLooksLikeRealWeapon(
+								lowerName
+							)
+							or nameLooksLikeRealWeapon(
+								parentName
+							)
+							or part:FindFirstAncestorOfClass(
+								"Tool"
+							) ~= nil
+
+						if weaponLike then
+							WeaponPackRuntime.hardHideGingerscopeOriginalPart(
+								part
+							)
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+function WeaponPackRuntime.disconnectPlayerWeaponPersistence()
+	if WeaponPackRuntime.playerWeaponPersistenceConnection then
+		WeaponPackRuntime.playerWeaponPersistenceConnection:Disconnect()
+		WeaponPackRuntime.playerWeaponPersistenceConnection =
+			nil
+	end
+
+	if WeaponPackRuntime.playerWeaponRemovingConnection then
+		WeaponPackRuntime.playerWeaponRemovingConnection:Disconnect()
+		WeaponPackRuntime.playerWeaponRemovingConnection =
+			nil
+	end
+end
+
+function WeaponPackRuntime.restoreOriginalWeaponVisibility(
+	character
+)
+	if not character then
+		return
+	end
+
+	for _, object in ipairs(
+		character:GetDescendants()
+	) do
+		if object:IsA("BasePart")
+			and not WeaponPackRuntime.isCharacterBodyPart(
+				object,
+				character
+			)
+			and not isInsideScriptedWeapon(object) then
+
+			local tool =
+				object:FindFirstAncestorOfClass(
+					"Tool"
+				)
+
+			local shouldRestore =
+				isOriginalWeaponPart(
+					object,
+					character
+				)
+				or isKnownMM2WeaponMesh(object)
+				or (
+					tool
+					and tool:IsDescendantOf(character)
+				)
+
+			if shouldRestore then
+				pcall(function()
+					object.LocalTransparencyModifier = 0
+				end)
+			end
+		end
+	end
 end
 
 local function stopRealWeaponHideLoop(character)
@@ -4096,8 +8959,7 @@ local function holsterWeapon(character, weaponName, slotModelName)
 		targetWorldCFrame
 		* weaponAttachmentCFrame:Inverse()
 
-	-- Match the PLAYER long-gun orientation exactly.
-	-- No bot-only position offset.
+	-- Harvester/Icepiercer use MM2's long-gun axis.
 	if weaponName == "Harvester"
 		or weaponName == "Icepiercer" then
 
@@ -4107,6 +8969,13 @@ local function holsterWeapon(character, weaponName, slotModelName)
 				math.rad(90),
 				0,
 				0
+			)
+
+	-- The Gingerscope UGC fallback has different local axes.
+	elseif weaponName == "Gingerscope" then
+		finalWorldCFrame =
+			getGingerscopeWorldCFrame(
+				targetWorldCFrame
 			)
 	end
 
@@ -4150,43 +9019,68 @@ local function getWeaponVisualData(
 	weaponName,
 	allowDeepSearch
 )
-	local exact =
+	local visual =
 		FALLBACK_WEAPON_VISUALS[
 			weaponName
 		]
+		or WeaponPackRuntime.RUNTIME_WEAPON_VISUAL_CACHE[
+			weaponName
+		]
 
-	if not exact then
+	if not visual and allowDeepSearch then
+		visual =
+			WeaponPackRuntime.resolveRuntimeWeaponVisual(
+				weaponName
+			)
+	end
+
+	if not visual then
 		return nil
 	end
 
 	return {
-		MeshId = exact.MeshId,
-		TextureId = exact.TextureId,
-		Scale = exact.Scale,
+		MeshId = visual.MeshId,
+		TextureId = visual.TextureId,
+		Scale = visual.Scale,
 		Offset =
-			exact.Offset
+			visual.Offset
 			or Vector3.zero,
 		Type =
-			exact.Type
+			visual.Type
 			or WeaponPackRuntime.WEAPON_TYPE_HINTS[
 				weaponName
 			]
 			or "Knife",
 		Placement =
-			exact.Placement,
+			visual.Placement
+			or (
+				WeaponPackRuntime.WEAPON_TYPE_HINTS[
+					weaponName
+				] == "Gun"
+				and "WaistRight"
+				or "WaistLeft"
+			),
 		AttachmentPosition =
-			exact.AttachmentPosition,
+			visual.AttachmentPosition,
 		AttachmentOrientation =
-			exact.AttachmentOrientation,
-		Color = exact.Color,
-		Material = exact.Material,
+			visual.AttachmentOrientation,
+		Color = visual.Color,
+		Material = visual.Material,
 		Transparency =
-			exact.Transparency,
+			visual.Transparency,
 		Reflectance =
-			exact.Reflectance,
+			visual.Reflectance,
 		VertexColor =
-			exact.VertexColor,
-		Source = "verified exact",
+			visual.VertexColor,
+		Source =
+			visual.Source
+			or (
+				FALLBACK_WEAPON_VISUALS[
+					weaponName
+				]
+				and "verified exact"
+				or "runtime resolved"
+			),
 	}
 end
 
@@ -5219,10 +10113,7 @@ local function orientLongGunCorrectly(
 		gunBelt.WorldCFrame
 		* weaponAttachment:Inverse()
 
-	-- TEST CORRECTION:
-	-- Both long guns use the same source attachment orientation.
-	-- Add a 90-degree roll to the WEAPON ONLY so the long body
-	-- sits sideways rather than vertical.
+	-- Harvester/Icepiercer use the same long-gun correction.
 	desired =
 		desired
 		* CFrame.Angles(
@@ -5363,6 +10254,7 @@ local function placeGunUsingExactAttachment(
 		or not visual
 		or weaponName == "Harvester"
 		or weaponName == "Icepiercer"
+		or weaponName == "Gingerscope"
 		or visual.Type ~= "Gun"
 		or not visual.AttachmentPosition
 		or not visual.AttachmentOrientation then
@@ -5552,6 +10444,44 @@ local function replaceCurrentEquippedWeaponMesh(character, weaponName, allowDeep
 		return false, "character missing"
 	end
 
+	-- Gingerscope is special: its fallback source is a real Waist Accessory.
+	-- Do NOT strip it into a SpecialMesh and do NOT rotate the MM2 host.
+	-- Just remember the real MM2 gun host, hide it locally, and attach the
+	-- complete Gingerscope accessory using its creator-supplied attachment.
+	if weaponName == "Gingerscope" then
+		-- Stop the older generic original-weapon mask if it was active.
+		-- Gingerscope has its own strict gun-only mask below.
+		stopRealWeaponHideLoop(character)
+
+		WeaponPackRuntime.currentReplacementPart =
+			nil
+
+		WeaponPackRuntime.currentReplacementWeaponName =
+			nil
+
+		WeaponPackRuntime.currentReplacementCharacter =
+			nil
+
+		WeaponPackRuntime.destroyPersistentGunFallback()
+
+		local nativeOk, nativeReason =
+			WeaponPackRuntime.ensureGingerscopeNativeAccessory(
+				character
+			)
+
+		if not nativeOk then
+			return false,
+				nativeReason
+				or "native Gingerscope accessory failed"
+		end
+
+		WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+			character
+		)
+
+		return true
+	end
+
 	local visual =
 		getWeaponVisualData(weaponName, allowDeepSearch)
 
@@ -5596,12 +10526,31 @@ local function replaceCurrentEquippedWeaponMesh(character, weaponName, allowDeep
 			"could not edit current weapon SpecialMesh"
 	end
 
-	-- Real MM2 gun exists again. Keep the workspace backup READY,
-	-- but invisible, so a round-end deletion can be covered instantly.
-	if WeaponPackRuntime.setPersistentGunFallbackVisible then
-		WeaponPackRuntime.setPersistentGunFallbackVisible(
-			false
-		)
+	-- For Gingerscope the persistent cosmetic is deliberately the ONLY
+	-- visible gun. The MM2-owned host remains available internally but hidden.
+	if weaponName == "Gingerscope" then
+		if WeaponPackRuntime.ensurePersistentGunFallback then
+			WeaponPackRuntime.ensurePersistentGunFallback(
+				character,
+				weaponName,
+				true
+			)
+		end
+
+		if WeaponPackRuntime.hideCurrentGunHost then
+			WeaponPackRuntime.hideCurrentGunHost(
+				character,
+				weaponName
+			)
+		end
+
+	else
+		-- Other guns retain the existing ready-but-hidden backup behavior.
+		if WeaponPackRuntime.setPersistentGunFallbackVisible then
+			WeaponPackRuntime.setPersistentGunFallbackVisible(
+				false
+			)
+		end
 	end
 
 	return true
@@ -5611,10 +10560,15 @@ local function scanWeapons()
 	table.clear(availableWeaponNames)
 
 	for _, name in ipairs(WEAPON_LIST) do
-		table.insert(
-			availableWeaponNames,
+		if not WeaponPackRuntime.PLAYER_WEAPON_EQUIP_DISABLED[
 			name
-		)
+		] then
+
+			table.insert(
+				availableWeaponNames,
+				name
+			)
+		end
 	end
 
 	weaponStatus.Text =
@@ -5641,10 +10595,13 @@ equipPlayerWeapon = function(name)
 	local wantedName = nil
 
 	for _, configuredName in ipairs(WEAPON_LIST) do
-		if isWeaponNameMatch(
-			name,
+		if not WeaponPackRuntime.PLAYER_WEAPON_EQUIP_DISABLED[
 			configuredName
-		) then
+		]
+			and isWeaponNameMatch(
+				name,
+				configuredName
+			) then
 
 			wantedName =
 				configuredName
@@ -5669,6 +10626,86 @@ equipPlayerWeapon = function(name)
 	weaponStatus.TextColor3 =
 		Color3.fromRGB(200, 200, 210)
 
+	local wantedType =
+		WeaponPackRuntime.WEAPON_TYPE_HINTS[
+			wantedName
+		]
+		or (
+			wantedName == "Harvester"
+			and "Gun"
+			or "Knife"
+		)
+
+	local previousSlotName =
+		wantedType == "Gun"
+		and WeaponPackRuntime.selectedGunName
+		or WeaponPackRuntime.selectedKnifeName
+
+	-- SLOT-SPECIFIC SWITCH CLEANUP:
+	-- Changing a gun must never remove the selected knife.
+	-- Changing a knife must never remove the selected gun.
+	if previousSlotName
+		and previousSlotName ~= wantedName then
+
+		if wantedType == "Gun" then
+			-- Only remove gun cosmetics/persistence.
+			WeaponPackRuntime.selectedGunName = nil
+
+			WeaponPackRuntime.destroyGingerscopeNativeAccessory()
+			WeaponPackRuntime.destroyPersistentGunFallback()
+
+			clearHolsteredWeapon(
+				character,
+				"HolsteredGun"
+			)
+
+			-- If Gingerscope had hidden MM2's real gun, reveal weapon hosts
+			-- before the next gun visual searches for its host.
+			WeaponPackRuntime.restoreOriginalWeaponVisibility(
+				character
+			)
+
+		else
+			-- Only remove the knife cosmetic slot.
+			WeaponPackRuntime.selectedKnifeName = nil
+
+			clearHolsteredWeapon(
+				character,
+				"HolsteredKnife"
+			)
+		end
+
+		-- Do NOT call restoreOriginalWeaponMeshes() here.
+		-- The next weapon in the SAME slot overwrites the same MM2 host,
+		-- while the opposite slot stays untouched.
+		RunService.Heartbeat:Wait()
+	end
+
+	-- Make the new slot selection visible to the render masks BEFORE
+	-- we modify the MM2 host. This prevents Gingerscope's mask from hiding
+	-- a knife during the tiny interval while it is being replaced.
+	if wantedType == "Gun" then
+		WeaponPackRuntime.selectedGunName =
+			wantedName
+	else
+		WeaponPackRuntime.selectedKnifeName =
+			wantedName
+	end
+
+	if wantedType == "Gun"
+		and wantedName ~= "Gingerscope" then
+
+		WeaponPackRuntime.restoreGingerscopeHardHiddenParts()
+		WeaponPackRuntime.destroyGingerscopeNativeAccessory()
+	end
+
+	if wantedName == "Gingerscope" then
+		WeaponPackRuntime.persistentGunFallbackLocalCFrame = nil
+		WeaponPackRuntime.persistentGunFallbackPoseWeapon = nil
+		WeaponPackRuntime.persistentGunFallbackUsesRootLock = false
+		WeaponPackRuntime.destroyPersistentGunFallback()
+	end
+
 	local success, reason =
 		replaceCurrentEquippedWeaponMesh(
 			character,
@@ -5677,6 +10714,15 @@ equipPlayerWeapon = function(name)
 		)
 
 	if not success then
+		-- Roll back only the slot that failed.
+		if wantedType == "Gun" then
+			WeaponPackRuntime.selectedGunName =
+				previousSlotName
+		else
+			WeaponPackRuntime.selectedKnifeName =
+				previousSlotName
+		end
+
 		weaponStatus.Text =
 			"Could not load " ..
 			wantedName ..
@@ -5687,6 +10733,17 @@ equipPlayerWeapon = function(name)
 			Color3.fromRGB(255, 105, 105)
 
 		return
+	end
+
+	if WeaponPackRuntime.persistentGunFallbackPoseWeapon
+		and WeaponPackRuntime.persistentGunFallbackPoseWeapon
+			~= wantedName then
+
+		WeaponPackRuntime.persistentGunFallbackLocalCFrame =
+			nil
+
+		WeaponPackRuntime.persistentGunFallbackPoseWeapon =
+			nil
 	end
 
 	selectedWeaponName =
@@ -5701,11 +10758,33 @@ equipPlayerWeapon = function(name)
 			wantedName
 		)
 
-	if equippedVisual
+	if wantedName == "Gingerscope" then
+		WeaponPackRuntime.destroyPersistentGunFallback()
+
+		local nativeOk, nativeReason =
+			WeaponPackRuntime.ensureGingerscopeNativeAccessory(
+				character
+			)
+
+		if not nativeOk then
+			weaponStatus.Text =
+				"Could not attach Gingerscope: " ..
+				tostring(nativeReason)
+
+			weaponStatus.TextColor3 =
+				Color3.fromRGB(255, 105, 105)
+
+			return
+		end
+
+		WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+			character
+		)
+
+	elseif equippedVisual
 		and equippedVisual.Type == "Gun" then
 
-		-- Build the backup NOW while all body placement data exists.
-		-- It stays hidden until the real MM2 gun disappears.
+		-- Other guns keep the existing persistence path.
 		WeaponPackRuntime.ensurePersistentGunFallback(
 			character,
 			wantedName,
@@ -5717,15 +10796,25 @@ equipPlayerWeapon = function(name)
 			wantedName
 		)
 	else
-		WeaponPackRuntime.destroyPersistentGunFallback()
+		-- Knife slot: leave the selected gun/Gingerscope persistence alone.
 	end
 
 	weaponBox.Text =
 		wantedName
 
+	local gunLabel =
+		WeaponPackRuntime.selectedGunName
+		or "-"
+
+	local knifeLabel =
+		WeaponPackRuntime.selectedKnifeName
+		or "-"
+
 	weaponStatus.Text =
-		"Equipped " ..
-		wantedName
+		"Gun: " ..
+		gunLabel ..
+		"  |  Knife: " ..
+		knifeLabel
 
 	weaponStatus.TextColor3 =
 		Color3.fromRGB(90, 235, 130)
@@ -5734,6 +10823,24 @@ end
 local function removePlayerWeaponReplacement()
 	-- Stop automatic reapplication first.
 	selectedWeaponName = nil
+	WeaponPackRuntime.selectedGunName = nil
+	WeaponPackRuntime.selectedKnifeName = nil
+
+	WeaponPackRuntime.disconnectPlayerWeaponPersistence()
+
+	WeaponPackRuntime.restoreGingerscopeHardHiddenParts()
+	WeaponPackRuntime.destroyGingerscopeNativeAccessory()
+
+	-- Explicit removal is the only time we intentionally forget the
+	-- saved persistent pose.
+	WeaponPackRuntime.persistentGunFallbackLocalCFrame =
+		nil
+
+	WeaponPackRuntime.persistentGunFallbackPoseWeapon =
+		nil
+
+	WeaponPackRuntime.persistentGunFallbackUsesRootLock =
+		false
 
 	WeaponPackRuntime.weaponPersistenceGeneration += 1
 
@@ -5754,6 +10861,28 @@ local function removePlayerWeaponReplacement()
 
 	local restored =
 		restoreOriginalWeaponMeshes()
+
+	-- The Gingerscope mask hides original gun/knife geometry directly.
+	-- On explicit removal, restore those local visibility modifiers.
+	local characterForVisibility =
+		player.Character
+
+	if characterForVisibility then
+		for _, object in ipairs(
+			characterForVisibility:GetDescendants()
+		) do
+			if object:IsA("BasePart")
+				and isOriginalWeaponPart(
+					object,
+					characterForVisibility
+				) then
+
+				pcall(function()
+					object.LocalTransparencyModifier = 0
+				end)
+			end
+		end
+	end
 
 	-- Remove any leftover cosmetic weapon from older script versions.
 	local character =
@@ -5855,6 +10984,21 @@ WeaponPackRuntime.persistentGunFallbackWeapon =
 	WeaponPackRuntime.persistentGunFallbackWeapon
 	or nil
 
+-- Exact pose of the visible persistent gun relative to its torso anchor.
+-- This survives round/map transitions and is reused if the visual must
+-- ever be rebuilt.
+WeaponPackRuntime.persistentGunFallbackLocalCFrame =
+	WeaponPackRuntime.persistentGunFallbackLocalCFrame
+	or nil
+
+WeaponPackRuntime.persistentGunFallbackPoseWeapon =
+	WeaponPackRuntime.persistentGunFallbackPoseWeapon
+	or nil
+
+WeaponPackRuntime.persistentGunFallbackUsesRootLock =
+	WeaponPackRuntime.persistentGunFallbackUsesRootLock
+	or false
+
 WeaponPackRuntime.lastGunBeltLocalCFrame =
 	WeaponPackRuntime.lastGunBeltLocalCFrame
 	or nil
@@ -5873,9 +11017,13 @@ WeaponPackRuntime.weaponPersistenceGeneration =
 
 WeaponPackRuntime.getPersistentVisualFolder =
 	function()
+		-- IMPORTANT:
+		-- Do NOT parent this to CurrentCamera. MM2 can replace the camera
+		-- between lobby and round, which destroys/reparents camera children
+		-- and previously forced the gun to rebuild with a different pose.
 		local folder =
 			workspace:FindFirstChild(
-				"SlaveControllerVisuals"
+				"SlaveControllerPersistentVisuals"
 			)
 
 		if not folder then
@@ -5885,7 +11033,12 @@ WeaponPackRuntime.getPersistentVisualFolder =
 				)
 
 			folder.Name =
-				"SlaveControllerVisuals"
+				"SlaveControllerPersistentVisuals"
+
+			folder:SetAttribute(
+				"ScriptOwnedPersistentVisuals",
+				true
+			)
 
 			folder.Parent =
 				workspace
@@ -5944,6 +11097,77 @@ WeaponPackRuntime.findBodyGunBelt =
 		return nil
 	end
 
+WeaponPackRuntime.isPersistentGunFallbackHealthy =
+	function(character, weaponName)
+		local model =
+			WeaponPackRuntime.persistentGunFallback
+
+		if not model
+			or not model.Parent
+			or WeaponPackRuntime.persistentGunFallbackCharacter
+				~= character
+			or WeaponPackRuntime.persistentGunFallbackWeapon
+				~= weaponName then
+
+			return false
+		end
+
+		local root =
+			model.PrimaryPart
+
+		if not root
+			or not root.Parent
+			or not root:IsDescendantOf(model) then
+
+			return false
+		end
+
+		if weaponName == "Gingerscope" then
+			-- Gingerscope is an anchored client-only visual driven from
+			-- HumanoidRootPart every rendered frame. It intentionally has
+			-- NO body weld, so LowerTorso/GunBelt changes cannot move it.
+			local hrp =
+				character:FindFirstChild(
+					"HumanoidRootPart"
+				)
+
+			if not hrp
+				or not hrp:IsA("BasePart")
+				or root.Anchored ~= true
+				or not WeaponPackRuntime.persistentGunFallbackLocalCFrame
+				or WeaponPackRuntime.persistentGunFallbackPoseWeapon
+					~= "Gingerscope" then
+
+				return false
+			end
+		else
+			local weld =
+				root:FindFirstChild(
+					"PersistentGunFallbackWeld"
+				)
+
+			if not weld
+				or not weld:IsA("WeldConstraint")
+				or weld.Part1 ~= root
+				or not weld.Part0
+				or not weld.Part0.Parent
+				or not weld.Part0:IsDescendantOf(character) then
+
+				return false
+			end
+		end
+
+		local expectedFolder =
+			WeaponPackRuntime.getPersistentVisualFolder()
+
+		if model.Parent ~= expectedFolder then
+			return false
+		end
+
+		return true
+	end
+
+
 WeaponPackRuntime.destroyPersistentGunFallback =
 	function()
 		local model =
@@ -5963,6 +11187,9 @@ WeaponPackRuntime.destroyPersistentGunFallback =
 
 		WeaponPackRuntime.persistentGunFallbackWeapon =
 			nil
+
+		WeaponPackRuntime.persistentGunFallbackUsesRootLock =
+			false
 	end
 
 -- Backwards-compatible name used by REMOVE WEAPON in older code.
@@ -6009,6 +11236,23 @@ WeaponPackRuntime.setPersistentGunFallbackVisible =
 
 WeaponPackRuntime.ensurePersistentGunFallback =
 	function(character, weaponName, visible)
+		if weaponName == "Gingerscope" then
+			WeaponPackRuntime.destroyPersistentGunFallback()
+
+			local ok =
+				WeaponPackRuntime.ensureGingerscopeNativeAccessory(
+					character
+				)
+
+			if ok then
+				WeaponPackRuntime.setGingerscopeNativeVisible(
+					visible ~= false
+				)
+			end
+
+			return ok == true
+		end
+
 		if not character
 			or character ~= player.Character
 			or not weaponName then
@@ -6028,15 +11272,10 @@ WeaponPackRuntime.ensurePersistentGunFallback =
 			return false
 		end
 
-		local existing =
-			WeaponPackRuntime.persistentGunFallback
-
-		if existing
-			and existing.Parent
-			and WeaponPackRuntime.persistentGunFallbackCharacter
-				== character
-			and WeaponPackRuntime.persistentGunFallbackWeapon
-				== weaponName then
+		if WeaponPackRuntime.isPersistentGunFallbackHealthy(
+			character,
+			weaponName
+		) then
 
 			WeaponPackRuntime.setPersistentGunFallbackVisible(
 				visible == true
@@ -6045,6 +11284,8 @@ WeaponPackRuntime.ensurePersistentGunFallback =
 			return true
 		end
 
+		-- If MM2 deleted only the Handle/weld but left the Model behind,
+		-- the old version got stuck here forever. Rebuild damaged backups.
 		WeaponPackRuntime.destroyPersistentGunFallback()
 
 		local source =
@@ -6088,7 +11329,7 @@ WeaponPackRuntime.ensurePersistentGunFallback =
 				character
 			)
 
-		local anchor =
+		local placementAnchor =
 			bodyAttachment
 			and bodyAttachment.Parent
 			or character:FindFirstChild(
@@ -6104,7 +11345,19 @@ WeaponPackRuntime.ensurePersistentGunFallback =
 				"HumanoidRootPart"
 			)
 
-		if not anchor
+		-- Gingerscope must not follow LowerTorso/GunBelt after placement.
+		-- HumanoidRootPart is the stable reference through animations and
+		-- lobby/round teleports. Other guns retain their existing behavior.
+		local anchor =
+			weaponName == "Gingerscope"
+			and character:FindFirstChild(
+				"HumanoidRootPart"
+			)
+			or placementAnchor
+
+		if not placementAnchor
+			or not placementAnchor:IsA("BasePart")
+			or not anchor
 			or not anchor:IsA("BasePart") then
 
 			model:Destroy()
@@ -6122,13 +11375,13 @@ WeaponPackRuntime.ensurePersistentGunFallback =
 
 		elseif WeaponPackRuntime.lastGunBeltLocalCFrame then
 			targetWorldCFrame =
-				anchor.CFrame
+				placementAnchor.CFrame
 				* WeaponPackRuntime.lastGunBeltLocalCFrame
 
 		else
 			targetWorldCFrame =
 				getFallbackBeltWorldCFrame(
-					anchor,
+					placementAnchor,
 					"WaistRight"
 				)
 		end
@@ -6166,6 +11419,23 @@ WeaponPackRuntime.ensurePersistentGunFallback =
 					0,
 					0
 				)
+
+		elseif weaponName == "Gingerscope" then
+			-- First build uses the tuned hip pose. Every later rebuild uses
+			-- the EXACT saved HumanoidRootPart-relative pose.
+			if WeaponPackRuntime.persistentGunFallbackLocalCFrame
+				and WeaponPackRuntime.persistentGunFallbackPoseWeapon
+					== weaponName then
+
+				finalWorldCFrame =
+					anchor.CFrame
+					* WeaponPackRuntime.persistentGunFallbackLocalCFrame
+			else
+				finalWorldCFrame =
+					getGingerscopeWorldCFrame(
+						targetWorldCFrame
+					)
+			end
 		end
 
 		local root =
@@ -6177,7 +11447,8 @@ WeaponPackRuntime.ensurePersistentGunFallback =
 		local liveHost =
 			WeaponPackRuntime.currentReplacementPart
 
-		if liveHost
+		if weaponName ~= "Gingerscope"
+			and liveHost
 			and liveHost.Parent
 			and WeaponPackRuntime.currentReplacementCharacter == character
 			and WeaponPackRuntime.currentReplacementWeaponName == weaponName then
@@ -6189,27 +11460,58 @@ WeaponPackRuntime.ensurePersistentGunFallback =
 		root.CFrame =
 			finalWorldCFrame
 
-		-- WORKSPACE parent is deliberate.
+		if weaponName == "Gingerscope" then
+			-- Save ONCE. Do not overwrite this during a round transition or
+			-- rebuild; that would allow a temporary shifted pose to become
+			-- the new permanent pose. Anchor is HumanoidRootPart here.
+			if not WeaponPackRuntime.persistentGunFallbackLocalCFrame
+				or WeaponPackRuntime.persistentGunFallbackPoseWeapon
+					~= weaponName then
+
+				WeaponPackRuntime.persistentGunFallbackLocalCFrame =
+					anchor.CFrame:ToObjectSpace(
+						root.CFrame
+					)
+
+				WeaponPackRuntime.persistentGunFallbackPoseWeapon =
+					weaponName
+			end
+
+			-- Purely visual, so remove physics/body-joint dependency entirely.
+			root.Anchored = true
+			WeaponPackRuntime.persistentGunFallbackUsesRootLock = true
+
+			model:SetAttribute(
+				"UnifiedGingerscopePlacement",
+				true
+			)
+		else
+			WeaponPackRuntime.persistentGunFallbackUsesRootLock = false
+		end
+
+		-- Parent to the persistent client-only visual folder.
 		-- MM2 can clear Character weapon descendants at round end.
 		model.Parent =
 			WeaponPackRuntime.getPersistentVisualFolder()
 
-		local weld =
-			Instance.new(
-				"WeldConstraint"
-			)
+		if weaponName ~= "Gingerscope" then
+			local weld =
+				Instance.new(
+					"WeldConstraint"
+				)
 
-		weld.Name =
-			"PersistentGunFallbackWeld"
+			weld.Name =
+				"PersistentGunFallbackWeld"
 
-		weld.Part0 =
-			anchor
+			weld.Part0 =
+				anchor
 
-		weld.Part1 =
-			root
+			weld.Part1 =
+				root
 
-		weld.Parent =
-			root
+			weld.Parent =
+				root
+		end
 
 		WeaponPackRuntime.persistentGunFallback =
 			model
@@ -6249,28 +11551,71 @@ WeaponPackRuntime.isCurrentReplacementAlive =
 
 WeaponPackRuntime.hideCurrentGunHost =
 	function(character, weaponName)
-		local part = WeaponPackRuntime.currentReplacementPart
+		if weaponName == "Gingerscope" then
+			WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+				character
+			)
+			return true
+		end
+
+		local part =
+			WeaponPackRuntime.currentReplacementPart
 
 		if not part
 			or not part.Parent
-			or WeaponPackRuntime.currentReplacementCharacter ~= character
-			or WeaponPackRuntime.currentReplacementWeaponName ~= weaponName then
+			or WeaponPackRuntime.currentReplacementCharacter
+				~= character
+			or WeaponPackRuntime.currentReplacementWeaponName
+				~= weaponName then
+
 			return false
 		end
 
-		-- The persistent cosmetic is now the visible gun.
-		-- Keep MM2's temporary round-owned host invisible so its deletion
-		-- can never make the selected gun disappear.
-		pcall(function()
-			part.LocalTransparencyModifier = 1
-		end)
+		-- Gingerscope uses the persistent cosmetic as its ONLY visible model.
+		-- MM2 may reset LocalTransparencyModifier during its own render/update
+		-- loops, so this function is also enforced every rendered frame below.
+		local container =
+			part:FindFirstAncestorOfClass("Tool")
+			or part:FindFirstAncestorOfClass("Accessory")
+			or part
 
-		for _, object in ipairs(part:GetDescendants()) do
-			if object:IsA("ParticleEmitter")
+		local function hideObject(object)
+			if object:IsA("BasePart") then
+				-- Never touch one of our own persistent cosmetic parts.
+				if not object:FindFirstAncestor(
+					"SlaveControllerPersistentVisuals"
+				) then
+					pcall(function()
+						object.LocalTransparencyModifier = 1
+					end)
+				end
+
+			elseif object:IsA("Decal")
+				or object:IsA("Texture") then
+
+				pcall(function()
+					object.Transparency = 1
+				end)
+
+			elseif object:IsA("ParticleEmitter")
 				or object:IsA("Trail")
-				or object:IsA("Beam") then
-				object.Enabled = false
+				or object:IsA("Beam")
+				or object:IsA("Smoke")
+				or object:IsA("Fire")
+				or object:IsA("Sparkles") then
+
+				pcall(function()
+					object.Enabled = false
+				end)
 			end
+		end
+
+		hideObject(container)
+
+		for _, object in ipairs(
+			container:GetDescendants()
+		) do
+			hideObject(object)
 		end
 
 		return true
@@ -6278,6 +11623,26 @@ WeaponPackRuntime.hideCurrentGunHost =
 
 WeaponPackRuntime.tryRestoreSelectedWeapon =
 	function(character)
+		if selectedWeaponName == "Gingerscope" then
+			if not character
+				or character ~= player.Character
+				or not character.Parent then
+
+				return false
+			end
+
+			local ok =
+				WeaponPackRuntime.ensureGingerscopeNativeAccessory(
+					character
+				)
+
+			WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+				character
+			)
+
+			return ok == true
+		end
+
 		if not selectedWeaponName
 			or not character
 			or character ~= player.Character
@@ -6364,6 +11729,23 @@ WeaponPackRuntime.roundReequipGeneration =
 
 WeaponPackRuntime.forceRoundWeaponReequip =
 	function(character, reason)
+		if selectedWeaponName == "Gingerscope" then
+			if character
+				and character == player.Character
+				and character.Parent then
+
+				WeaponPackRuntime.ensureGingerscopeNativeAccessory(
+					character
+				)
+
+				WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+					character
+				)
+			end
+
+			return
+		end
+
 		if not selectedWeaponName
 			or not character
 			or character ~= player.Character
@@ -6411,9 +11793,34 @@ WeaponPackRuntime.forceRoundWeaponReequip =
 						selectedWeaponName
 					)
 
-				if visual.Type == "Gun"
-					and not realStillAlive then
+				-- If the replacement that belongs to the CURRENT selection is
+				-- already alive, leave its mesh/joint completely alone.
+				-- This is especially important for knives: repeatedly rewriting
+				-- the host every 0.15s caused the gun/knife flicker.
+				if realStillAlive then
+					if visual.Type == "Gun" then
+						WeaponPackRuntime.ensurePersistentGunFallback(
+							character,
+							selectedWeaponName,
+							true
+						)
 
+						WeaponPackRuntime.hideCurrentGunHost(
+							character,
+							selectedWeaponName
+						)
+					end
+
+					task.wait(
+						attempt <= 12
+						and 0.15
+						or 0.25
+					)
+
+					continue
+				end
+
+				if visual.Type == "Gun" then
 					WeaponPackRuntime.ensurePersistentGunFallback(
 						character,
 						selectedWeaponName,
@@ -6474,17 +11881,7 @@ WeaponPackRuntime.forceRoundWeaponReequip =
 
 WeaponPackRuntime.bindPlayerWeaponPersistence =
 	function(character)
-		if WeaponPackRuntime.playerWeaponPersistenceConnection then
-			WeaponPackRuntime.playerWeaponPersistenceConnection:Disconnect()
-			WeaponPackRuntime.playerWeaponPersistenceConnection =
-				nil
-		end
-
-		if WeaponPackRuntime.playerWeaponRemovingConnection then
-			WeaponPackRuntime.playerWeaponRemovingConnection:Disconnect()
-			WeaponPackRuntime.playerWeaponRemovingConnection =
-				nil
-		end
+		WeaponPackRuntime.disconnectPlayerWeaponPersistence()
 
 		if not character then
 			return
@@ -6494,6 +11891,85 @@ WeaponPackRuntime.bindPlayerWeaponPersistence =
 			character.DescendantAdded:Connect(
 				function(descendant)
 					if not selectedWeaponName then
+						return
+					end
+
+					if WeaponPackRuntime.selectedGunName == "Gingerscope" then
+						-- Always hide the newly-created MM2 gun immediately.
+						task.defer(function()
+							if WeaponPackRuntime.selectedGunName == "Gingerscope"
+								and player.Character == character
+								and character.Parent then
+
+								WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+									character
+								)
+							end
+						end)
+
+						-- If the last-changed slot is the knife, do not let a newly
+						-- spawned GUN object trigger the generic knife replacement.
+						if selectedWeaponName == WeaponPackRuntime.selectedKnifeName then
+							local current =
+								descendant
+
+							local looksKnife =
+								false
+
+							while current
+								and current ~= character do
+
+								local lower =
+									string.lower(
+										tostring(
+											current.Name
+										)
+									)
+
+								if string.find(
+									lower,
+									"knife",
+									1,
+									true
+								)
+									or string.find(
+										lower,
+										"blade",
+										1,
+										true
+									)
+									or lower == "knifebelt"
+									or lower == "knifeback" then
+
+									looksKnife =
+										true
+									break
+								end
+
+								current =
+									current.Parent
+							end
+
+							if not looksKnife then
+								return
+							end
+						end
+					end
+
+					if selectedWeaponName == "Gingerscope" then
+						-- MM2 may add a new Gun Tool/display mid-round.
+						-- Do NOT reacquire/mesh-swap it; just hide definite guns.
+						task.defer(function()
+							if selectedWeaponName == "Gingerscope"
+								and player.Character == character
+								and character.Parent then
+
+								WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+									character
+								)
+							end
+						end)
+
 						return
 					end
 
@@ -6519,6 +11995,12 @@ WeaponPackRuntime.bindPlayerWeaponPersistence =
 			character.DescendantRemoving:Connect(
 				function(descendant)
 					if not selectedWeaponName then
+						return
+					end
+
+					if selectedWeaponName == "Gingerscope" then
+						-- Native Gingerscope lives in workspace, not Character.
+						-- Character weapon removals must never alter its state.
 						return
 					end
 
@@ -6590,6 +12072,111 @@ WeaponPackRuntime.bindPlayerWeaponPersistence(
 	player.Character
 )
 
+-- GINGERSCOPE NATIVE-ACCESSORY MODE
+-- The real MM2 gun remains functional but invisible.
+-- The visible Gingerscope is the intact UGC Waist Accessory, attached using
+-- its own native Waist*Attachment. No manual rotation/position math is used.
+pcall(function()
+	RunService:UnbindFromRenderStep(
+		"BotControllerGingerscopeHostMask"
+	)
+end)
+
+pcall(function()
+	RunService:UnbindFromRenderStep(
+		"BotControllerGingerscopePoseLock"
+	)
+end)
+
+RunService:BindToRenderStep(
+	"BotControllerGingerscopeHostMask",
+	Enum.RenderPriority.Last.Value,
+	function()
+		if WeaponPackRuntime.selectedGunName ~= "Gingerscope" then
+			return
+		end
+
+		local character =
+			player.Character
+
+		if not character
+			or not character.Parent then
+
+			return
+		end
+
+		-- Never scan/re-equip a host here.
+		-- Hide ONLY definite MM2 gun containers and explicitly preserve knives.
+		WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+			character
+		)
+
+		WeaponPackRuntime.setGingerscopeNativeVisible(
+			true
+		)
+	end
+)
+
+-- Independent self-healing guard for the persistent gun cosmetic.
+-- Round cleanup can remove only part of a Model, so validate the whole
+-- fallback frequently and recreate it if anything important is missing.
+local nextPersistentGunGuard = 0
+
+RunService.Heartbeat:Connect(function()
+	if time() < nextPersistentGunGuard then
+		return
+	end
+
+	nextPersistentGunGuard =
+		time() + 0.12
+
+	local character =
+		player.Character
+
+	if not character
+		or not character.Parent then
+
+		return
+	end
+
+	-- Gingerscope belongs to the GUN slot, so it must keep running even
+	-- if the knife was the most recently selected item.
+	if WeaponPackRuntime.selectedGunName == "Gingerscope" then
+		WeaponPackRuntime.ensureGingerscopeNativeAccessory(
+			character
+		)
+
+		WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+			character
+		)
+	end
+
+	if not selectedWeaponName then
+		return
+	end
+
+	local visual =
+		getWeaponVisualData(
+			selectedWeaponName
+		)
+
+	if not visual
+		or visual.Type ~= "Gun" then
+
+		return
+	end
+
+	if selectedWeaponName == "Gingerscope" then
+		return
+	end
+
+	WeaponPackRuntime.ensurePersistentGunFallback(
+		character,
+		selectedWeaponName,
+		true
+	)
+end)
+
 --------------------------------------------------
 -- ROUND TRANSITION WEAPON WATCH
 --
@@ -6646,12 +12233,71 @@ RunService.Heartbeat:Connect(function()
 			WeaponPackRuntime.nextRoundTeleportWeaponTrigger =
 				time() + 1.5
 
-			if selectedWeaponName then
+			if WeaponPackRuntime.selectedGunName == "Gingerscope" then
+				WeaponPackRuntime.ensureGingerscopeNativeAccessory(
+					character
+				)
+
+				WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+					character
+				)
+			elseif selectedWeaponName then
 				WeaponPackRuntime.forceRoundWeaponReequip(
 					character,
 					"round/map teleport"
 				)
 			end
+
+			-- Restore the opposite slot too. The legacy persistence engine
+			-- follows only selectedWeaponName (last changed slot).
+			task.defer(function()
+				if player.Character ~= character
+					or not character.Parent then
+					return
+				end
+
+				if WeaponPackRuntime.selectedGunName
+					and WeaponPackRuntime.selectedGunName ~= selectedWeaponName then
+
+					if WeaponPackRuntime.selectedGunName == "Gingerscope" then
+						WeaponPackRuntime.ensureGingerscopeNativeAccessory(
+							character
+						)
+
+						WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+							character
+						)
+					else
+						local gunOk =
+							replaceCurrentEquippedWeaponMesh(
+								character,
+								WeaponPackRuntime.selectedGunName
+							)
+
+						if gunOk then
+							WeaponPackRuntime.ensurePersistentGunFallback(
+								character,
+								WeaponPackRuntime.selectedGunName,
+								true
+							)
+
+							WeaponPackRuntime.hideCurrentGunHost(
+								character,
+								WeaponPackRuntime.selectedGunName
+							)
+						end
+					end
+				end
+
+				if WeaponPackRuntime.selectedKnifeName
+					and WeaponPackRuntime.selectedKnifeName ~= selectedWeaponName then
+
+					replaceCurrentEquippedWeaponMesh(
+						character,
+						WeaponPackRuntime.selectedKnifeName
+					)
+				end
+			end)
 		end
 	end
 
@@ -6664,6 +12310,28 @@ end)
 -- Expensive candidate scanning happens only after that pointer disappears.
 RunService.Heartbeat:Connect(function()
 	if not selectedWeaponName then
+		return
+	end
+
+	if selectedWeaponName == "Gingerscope" then
+		local character =
+			player.Character
+
+		if character
+			and character.Parent then
+
+			WeaponPackRuntime.ensureGingerscopeNativeAccessory(
+				character
+			)
+
+			WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+				character
+			)
+		end
+
+		nextWeaponMeshRefresh =
+			time() + 0.35
+
 		return
 	end
 
@@ -6732,6 +12400,10 @@ RunService.Heartbeat:Connect(function()
 end)
 
 player.CharacterAdded:Connect(function(character)
+	-- A genuinely new character needs a new root weld. Round teleports on
+	-- the same character do NOT hit this, so the existing Gingerscope stays.
+	WeaponPackRuntime.destroyGingerscopeNativeAccessory()
+
 	WeaponPackRuntime.currentReplacementPart =
 		nil
 
@@ -6747,7 +12419,116 @@ player.CharacterAdded:Connect(function(character)
 		character
 	)
 
+	-- Restore whichever slot is NOT handled by selectedWeaponName below.
+	task.spawn(function()
+		character:WaitForChild(
+			"HumanoidRootPart",
+			10
+		)
+
+		if player.Character ~= character
+			or not character.Parent then
+
+			return
+		end
+
+		task.wait(0.2)
+
+		if WeaponPackRuntime.selectedGunName
+			and WeaponPackRuntime.selectedGunName ~= selectedWeaponName then
+
+			if WeaponPackRuntime.selectedGunName == "Gingerscope" then
+				for _ = 1, 30 do
+					if player.Character ~= character
+						or not character.Parent then
+
+						return
+					end
+
+					local ok =
+						WeaponPackRuntime.ensureGingerscopeNativeAccessory(
+							character
+						)
+
+					if ok then
+						WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+							character
+						)
+						break
+					end
+
+					task.wait(0.1)
+				end
+			else
+				local gunOk =
+					replaceCurrentEquippedWeaponMesh(
+						character,
+						WeaponPackRuntime.selectedGunName,
+						true
+					)
+
+				if gunOk then
+					WeaponPackRuntime.ensurePersistentGunFallback(
+						character,
+						WeaponPackRuntime.selectedGunName,
+						true
+					)
+
+					WeaponPackRuntime.hideCurrentGunHost(
+						character,
+						WeaponPackRuntime.selectedGunName
+					)
+				end
+			end
+		end
+
+		if WeaponPackRuntime.selectedKnifeName
+			and WeaponPackRuntime.selectedKnifeName ~= selectedWeaponName then
+
+			replaceCurrentEquippedWeaponMesh(
+				character,
+				WeaponPackRuntime.selectedKnifeName,
+				true
+			)
+		end
+	end)
+
 	if not selectedWeaponName then
+		return
+	end
+
+	if selectedWeaponName == "Gingerscope" then
+		task.spawn(function()
+			character:WaitForChild(
+				"HumanoidRootPart",
+				10
+			)
+
+			if selectedWeaponName ~= "Gingerscope"
+				or player.Character ~= character
+				or not character.Parent then
+
+				return
+			end
+
+			-- Wait briefly for the avatar Waist attachment to exist.
+			for _ = 1, 30 do
+				local ok =
+					WeaponPackRuntime.ensureGingerscopeNativeAccessory(
+						character
+					)
+
+				if ok then
+					WeaponPackRuntime.enforceGingerscopeVisualIsolation(
+						character
+					)
+					return
+				end
+
+				task.wait(0.1)
+			end
+		end)
+
 		return
 	end
 
@@ -6968,7 +12749,7 @@ local function addAvatarEntryFromUI(entry)
 	if not entry or not entry:match("%S") then
 		addAvatarStatus.Text = "Enter a username or user ID"
 		addAvatarStatus.TextColor3 = Color3.fromRGB(255, 105, 105)
-		return
+		return nil
 	end
 
 	entry = entry:match("^%s*(.-)%s*$")
@@ -7005,50 +12786,30 @@ local function addAvatarEntryFromUI(entry)
 	if not userId or not username then
 		addAvatarStatus.Text = "Could not resolve that account"
 		addAvatarStatus.TextColor3 = Color3.fromRGB(255, 105, 105)
-		return
+		return nil
 	end
 
-	-- Prevent duplicate account IDs in the master resolved list.
-	for _, avatar in ipairs(BOT_AVATARS) do
-		if avatar.userId == userId then
-			addAvatarStatus.Text = username .. " is already added"
-			addAvatarStatus.TextColor3 = Color3.fromRGB(255, 190, 90)
-			return
-		end
-	end
-
-	local avatar = {
+	return {
 		userId = userId,
 		username = username,
 	}
-
-	table.insert(BOT_AVATARS, avatar)
-
-	-- Also add it to the currently available pool if not already there.
-	local alreadyAvailable = false
-	for _, available in ipairs(AVAILABLE_BOT_AVATARS) do
-		if available.userId == userId then
-			alreadyAvailable = true
-			break
-		end
-	end
-
-	if not alreadyAvailable then
-		table.insert(AVAILABLE_BOT_AVATARS, avatar)
-	end
-
-	addAvatarStatus.Text = "Added " .. username
-	addAvatarStatus.TextColor3 = Color3.fromRGB(90, 235, 130)
-	addAvatarBox.Text = ""
 end
 
 addAvatarButton.MouseButton1Click:Connect(function()
-	addAvatarEntryFromUI(addAvatarBox.Text)
+	if WeaponPackRuntime.SpawnAvatarFromUI then
+		WeaponPackRuntime.SpawnAvatarFromUI(
+			addAvatarBox.Text
+		)
+	end
 end)
 
 addAvatarBox.FocusLost:Connect(function(enterPressed)
-	if enterPressed then
-		addAvatarEntryFromUI(addAvatarBox.Text)
+	if enterPressed
+		and WeaponPackRuntime.SpawnAvatarFromUI then
+
+		WeaponPackRuntime.SpawnAvatarFromUI(
+			addAvatarBox.Text
+		)
 	end
 end)
 
@@ -7842,22 +13603,26 @@ WeaponPackRuntime.BOT_KNIFE_POOL = {}
 for _, configuredWeapon in ipairs(
 	WEAPON_LIST
 ) do
-	local weaponType =
-		WeaponPackRuntime.WEAPON_TYPE_HINTS[
-			configuredWeapon
-		]
+	if not WeaponPackRuntime.PLAYER_WEAPON_EQUIP_DISABLED[
+		configuredWeapon
+	] then
+		local weaponType =
+			WeaponPackRuntime.WEAPON_TYPE_HINTS[
+				configuredWeapon
+			]
 
-	if weaponType == "Gun" then
-		table.insert(
-			WeaponPackRuntime.BOT_GUN_POOL,
-			configuredWeapon
-		)
+		if weaponType == "Gun" then
+			table.insert(
+				WeaponPackRuntime.BOT_GUN_POOL,
+				configuredWeapon
+			)
 
-	elseif weaponType == "Knife" then
-		table.insert(
-			WeaponPackRuntime.BOT_KNIFE_POOL,
-			configuredWeapon
-		)
+		elseif weaponType == "Knife" then
+			table.insert(
+				WeaponPackRuntime.BOT_KNIFE_POOL,
+				configuredWeapon
+			)
+		end
 	end
 end
 
@@ -7879,6 +13644,23 @@ WeaponPackRuntime.equipBotDualLoadout =
 			keepExistingNames
 			and bot.knifeName
 			or nil
+
+		-- Never preserve a bot weapon that was removed from the weapon pools.
+		if gunName
+			and WeaponPackRuntime.PLAYER_WEAPON_EQUIP_DISABLED[
+				gunName
+			] then
+
+			gunName = nil
+		end
+
+		if knifeName
+			and WeaponPackRuntime.PLAYER_WEAPON_EQUIP_DISABLED[
+				knifeName
+			] then
+
+			knifeName = nil
+		end
 
 		if not gunName
 			and #WeaponPackRuntime.BOT_GUN_POOL > 0 then
@@ -8464,6 +14246,74 @@ local function createBot(number, forcedAvatar)
 	end)
 end
 
+-- Direct SPAWN AVATAR UI behavior.
+-- Resolves the entered username / user ID and immediately creates that bot.
+-- It does NOT save the account into the random bot avatar pool.
+WeaponPackRuntime.SpawnAvatarFromUI = function(entry)
+	local avatar =
+		addAvatarEntryFromUI(
+			entry
+		)
+
+	if not avatar then
+		return
+	end
+
+	for _, bot in ipairs(
+		bots
+	) do
+		if bot.userId == avatar.userId then
+			addAvatarStatus.Text =
+				avatar.username
+				.. " is already spawned"
+
+			addAvatarStatus.TextColor3 =
+				Color3.fromRGB(
+					255,
+					190,
+					90
+				)
+
+			return
+		end
+	end
+
+	local previousCount =
+		#bots
+
+	createBot(
+		previousCount + 1,
+		avatar
+	)
+
+	if #bots > previousCount then
+		addAvatarStatus.Text =
+			"Spawned "
+			.. avatar.username
+
+		addAvatarStatus.TextColor3 =
+			Color3.fromRGB(
+				90,
+				235,
+				130
+			)
+
+		addAvatarBox.Text =
+			""
+	else
+		addAvatarStatus.Text =
+			"Could not spawn "
+			.. avatar.username
+
+		addAvatarStatus.TextColor3 =
+			Color3.fromRGB(
+				255,
+				105,
+				105
+			)
+	end
+end
+
 --------------------------------------------------
 -- REMOVE BOTS
 --------------------------------------------------
@@ -8491,7 +14341,7 @@ local function removeBots()
 end
 
 --------------------------------------------------
--- ONE-BOT ROTATION
+-- TWO-BOT ROTATION
 --------------------------------------------------
 
 local function getUnusedReplacementAvatar(excludedUserId)
@@ -8541,37 +14391,115 @@ local function removeSingleBot(index)
 	return bot
 end
 
-local function rotateOneBot()
+local function rotateTwoBots()
 	if not running or #bots == 0 then
 		return
 	end
 
-	-- Pick exactly ONE currently spawned bot.
-	local index = math.random(1, #bots)
-	local oldBot = bots[index]
+	-- Pick two DISTINCT currently spawned bots before replacing either one.
+	-- They are replaced one by one, not both at the exact same moment.
+	local firstIndex =
+		math.random(
+			1,
+			#bots
+		)
 
-	if not oldBot then
+	local firstBot =
+		bots[firstIndex]
+
+	if not firstBot then
 		return
 	end
 
-	-- Find a different avatar that is not currently active.
-	local replacement =
-		getUnusedReplacementAvatar(oldBot.userId)
+	local targetNumbers = {
+		firstBot.number,
+	}
 
-	if not replacement then
-		warn("No unused avatar is available for bot rotation.")
-		return
+	if #bots >= 2 then
+		local secondIndex =
+			math.random(
+				1,
+				#bots - 1
+			)
+
+		if secondIndex >= firstIndex then
+			secondIndex += 1
+		end
+
+		local secondBot =
+			bots[secondIndex]
+
+		if secondBot then
+			table.insert(
+				targetNumbers,
+				secondBot.number
+			)
+		end
 	end
 
-	local botNumber = oldBot.number
+	for _, targetNumber in ipairs(
+		targetNumbers
+	) do
+		if not running then
+			break
+		end
 
-	removeSingleBot(index)
+		local currentIndex =
+			nil
 
-	-- Small natural gap between one bot leaving and the new one joining.
-	task.wait(math.random(8, 20) / 10)
+		local oldBot =
+			nil
 
-	if running then
-		createBot(botNumber, replacement)
+		for index, bot in ipairs(
+			bots
+		) do
+			if bot.number == targetNumber then
+				currentIndex =
+					index
+
+				oldBot =
+					bot
+
+				break
+			end
+		end
+
+		if oldBot
+			and currentIndex then
+
+			local replacement =
+				getUnusedReplacementAvatar(
+					oldBot.userId
+				)
+
+			if replacement then
+				local botNumber =
+					oldBot.number
+
+				removeSingleBot(
+					currentIndex
+				)
+
+				-- Keep the old natural one-by-one replacement feel.
+				task.wait(
+					math.random(
+						8,
+						20
+					) / 10
+				)
+
+				if running then
+					createBot(
+						botNumber,
+						replacement
+					)
+				end
+			else
+				warn(
+					"No unused avatar is available for bot rotation."
+				)
+			end
+		end
 	end
 end
 
@@ -8590,8 +14518,8 @@ local function startBotRotation()
 				break
 			end
 
-			-- Only ONE bot is replaced on each interval.
-			rotateOneBot()
+			-- Every 5 minutes, replace TWO distinct bots one by one.
+			rotateTwoBots()
 		end
 	end)
 end
@@ -8669,7 +14597,10 @@ end
 
 RunService.Heartbeat:Connect(function()
 
-	if not running then
+	-- Normal START BOTS uses `running`, but manually spawned avatars
+	-- should use the exact same follow/idle/pathfinding movement even
+	-- when the normal bot pool has not been started.
+	if not running and #bots == 0 then
 		return
 	end
 
