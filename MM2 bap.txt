@@ -690,6 +690,8 @@ WeaponPackRuntime.startOneSliceForGui =
 local WEAPON_LIST = {
 	"Harvester",
 	"Gingerscope",
+	"Chroma Traveler's Gun",
+	"Traveler's Knife",
 	"Icepiercer",
 	"Snowcannon",
 	"Flowerwood Gun",
@@ -719,6 +721,8 @@ WeaponPackRuntime.PLAYER_WEAPON_EQUIP_DISABLED = {
 local WEAPON_ALIASES = {
 	["Harvester"] = {"Harvester"},
 	["Gingerscope"] = {"Gingerscope", "Ginger Scope"},
+	["Chroma Traveler's Gun"] = {"Chroma Traveler's Gun", "Chroma Travelers Gun", "Chroma Traveller's Gun", "Chroma Travellers Gun"},
+	["Traveler's Knife"] = {"Traveler's Knife", "Travelers Knife", "Traveller's Knife", "Travellers Knife", "Traveler's Axe", "Travelers Axe", "Traveller's Axe", "Travellers Axe"},
 	["Icepiercer"] = {"Icepiercer", "Ice Piercer"},
 	["Snowcannon"] = {"Snowcannon", "Snow Cannon"},
 	["Flowerwood Gun"] = {"Flowerwood Gun", "FlowerwoodGun"},
@@ -743,6 +747,8 @@ local WEAPON_ALIASES = {
 WeaponPackRuntime.WEAPON_TYPE_HINTS = {
 	["Harvester"] = "Gun",
 	["Gingerscope"] = "Gun",
+	["Chroma Traveler's Gun"] = "Gun",
+	["Traveler's Knife"] = "Knife",
 	["Icepiercer"] = "Gun",
 	["Snowcannon"] = "Gun",
 	["Flowerwood Gun"] = "Gun",
@@ -766,6 +772,8 @@ WeaponPackRuntime.WEAPON_TYPE_HINTS = {
 
 WeaponPackRuntime.WEAPON_YEAR_HINTS = {
 	["Gingerscope"] = 2023,
+	["Chroma Traveler's Gun"] = 2023,
+	["Traveler's Knife"] = 2023,
 	["Icepiercer"] = 2022,
 	["Snowcannon"] = 2025,
 	["Flowerwood Gun"] = 2024,
@@ -790,6 +798,34 @@ WeaponPackRuntime.WEAPON_YEAR_HINTS = {
 -- Exact IDs are hardcoded only when verified.
 -- Newer items are resolved from the current MM2 client instead of guessed.
 local FALLBACK_WEAPON_VISUALS = {
+	-- Exact values captured from MM2 Workspace.WeaponDisplays.
+	-- These two use a dedicated direct-display path for the player so the
+	-- scanned MeshPart/Part geometry is preserved instead of guessing scale.
+	["Chroma Traveler's Gun"] = {
+		Type = "Gun",
+		Placement = "WaistRight",
+		MeshId = "rbxassetid://15090814396",
+		TextureId = "rbxassetid://132537117087610",
+		Scale = Vector3.new(0.04990, 0.04990, 0.04990),
+		Offset = Vector3.zero,
+		PartSize = Vector3.new(0.20000, 1.83000, 1.03000),
+		ScannedDisplayKind = "SpecialMesh",
+		ScannedDisplayName = "GunDisplay",
+		WeaponAttachmentName = "GunWeaponAttachment",
+		Source = "verified Workspace.WeaponDisplays scan",
+	},
+	["Traveler's Knife"] = {
+		Type = "Knife",
+		Placement = "WaistLeft",
+		MeshId = "rbxassetid://15057341638",
+		TextureId = "rbxassetid://15057460725",
+		-- Exact MeshPart size from the scanner.
+		PartSize = Vector3.new(0.60441, 3.40600, 2.18736),
+		ScannedDisplayKind = "MeshPart",
+		ScannedDisplayName = "KnifeDisplay",
+		WeaponAttachmentName = "KnifeWeaponAttachment",
+		Source = "verified Workspace.WeaponDisplays scan",
+	},
 	["Harvester"] = {
 		Type = "Gun",
 		Placement = "WaistRight",
@@ -3142,22 +3178,40 @@ function WeaponPackRuntime.makeVisualTool(name, visual)
 	tool.RequiresHandle = true
 	tool.CanBeDropped = false
 
-	local handle = Instance.new("Part")
-	handle.Name = "Handle"
-	handle.Size = Vector3.new(1,1,1)
+	local handle
+
+	-- Traveler's Knife was captured as an actual MeshPart. Preserve that
+	-- geometry instead of converting it to a guessed SpecialMesh scale.
+	if visual.ScannedDisplayKind == "MeshPart" then
+		handle = Instance.new("MeshPart")
+		handle.Name = "Handle"
+		handle.Size = visual.PartSize or Vector3.new(1,1,1)
+		pcall(function()
+			handle.MeshId = visual.MeshId
+		end)
+		pcall(function()
+			handle.TextureID = visual.TextureId or ""
+		end)
+	else
+		handle = Instance.new("Part")
+		handle.Name = "Handle"
+		handle.Size = visual.PartSize or Vector3.new(1,1,1)
+
+		local mesh = Instance.new("SpecialMesh")
+		mesh.MeshType = Enum.MeshType.FileMesh
+		mesh.MeshId = visual.MeshId
+		mesh.TextureId = visual.TextureId or ""
+		mesh.Scale = visual.Scale or Vector3.new(1,1,1)
+		mesh.Offset = visual.Offset or Vector3.zero
+		mesh.Parent = handle
+	end
+
 	handle.CanCollide = false
 	handle.CanTouch = false
 	handle.CanQuery = false
 	handle.Massless = true
 	handle.Parent = tool
 
-	local mesh = Instance.new("SpecialMesh")
-	mesh.MeshType = Enum.MeshType.FileMesh
-	mesh.MeshId = visual.MeshId
-	mesh.TextureId = visual.TextureId or ""
-	mesh.Scale = visual.Scale or Vector3.new(1,1,1)
-	mesh.Offset = visual.Offset or Vector3.zero
-	mesh.Parent = handle
 	return tool
 end
 
@@ -6505,12 +6559,35 @@ WeaponPackRuntime.RealisticSpawner.LoadModules = function()
 	return true
 end
 
-WeaponPackRuntime.RealisticSpawner.IsSpawnerRarity = function(data)
-	return type(data) == "table"
-		and (
-			data.Rarity == "Godly"
-			or data.Rarity == "Ancient"
-		)
+WeaponPackRuntime.RealisticSpawner.IsSpawnerRarity = function(data, itemId)
+	if type(data) ~= "table" then
+		return false
+	end
+
+	if data.Rarity == "Godly"
+		or data.Rarity == "Ancient" then
+
+		return true
+	end
+
+	-- Corrupt is Unique in MM2, so explicitly allow it through the
+	-- realistic-spawner rarity filter without widening the filter to all
+	-- Unique items.
+	local idText = tostring(itemId or "")
+		:lower()
+		:gsub("[^%w%?]", "")
+
+	local nameText = tostring(
+		data.ItemName
+		or data.Name
+		or data.DisplayName
+		or ""
+	)
+		:lower()
+		:gsub("[^%w%?]", "")
+
+	return idText == "corrupt"
+		or nameText == "corrupt"
 end
 
 -- Keep the realistic spawner from adding the unwanted/placeholder cards.
@@ -6778,6 +6855,11 @@ WeaponPackRuntime.RealisticSpawner.GetSpawnAmount = function(itemId, data)
 		return math.random(37, 44)
 	end
 
+	-- Corrupt uses its own requested realistic-spawner range.
+	if matches(itemId, data, {"corrupt"}) then
+		return math.random(74, 97)
+	end
+
 	-- Everything else.
 	return math.random(78, 127)
 end
@@ -6851,7 +6933,7 @@ WeaponPackRuntime.RealisticSpawner.SpawnAll = function()
 
 	local function collect(container, itemType)
 		for itemId, data in pairs(container or {}) do
-			if WeaponPackRuntime.RealisticSpawner.IsSpawnerRarity(data)
+			if WeaponPackRuntime.RealisticSpawner.IsSpawnerRarity(data, itemId)
 				and not WeaponPackRuntime.RealisticSpawner.IsExcludedItem(
 					itemId,
 					data
@@ -7581,6 +7663,342 @@ local function prepareWeaponVisual(
 	return model
 end
 
+--------------------------------------------------
+-- EXACT SCANNED TRAVELER DISPLAY WEAPONS
+--
+-- Captured directly from Workspace.WeaponDisplays:
+--   Chroma Traveler's Gun = GunDisplay (Part + SpecialMesh)
+--   Traveler's Knife     = KnifeDisplay (MeshPart)
+--
+-- The MM2 display objects live outside Character, so the older character-only
+-- mesh replacement path cannot see them. These two use their own client-side
+-- visual models and the exact torso attachment transforms observed in MM2.
+--------------------------------------------------
+
+WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS = {
+	["Chroma Traveler's Gun"] = {
+		Type = "Gun",
+		DisplayName = "GunDisplay",
+		WeaponAttachmentName = "GunWeaponAttachment",
+		ModelName = "HolsteredGun",
+		TorsoCFrame = CFrame.new(1.26, -1.50, 0.20)
+			* CFrame.Angles(
+				math.rad(-60.002678),
+				math.rad(180),
+				math.rad(180)
+			),
+	},
+	["Traveler's Knife"] = {
+		Type = "Knife",
+		DisplayName = "KnifeDisplay",
+		WeaponAttachmentName = "KnifeWeaponAttachment",
+		ModelName = "HolsteredKnife",
+		-- Workspace.WeaponDisplays reports the raw MeshPart bounds, but cloning
+		-- that display under Character renders much larger than MM2's native
+		-- presentation. Keep the exact mesh/texture and correct only the visual
+		-- size here.
+		VisualScale = 0.38,
+		TorsoCFrame = CFrame.new(-1.20, -1.30, 0.25)
+			* CFrame.Angles(
+				math.rad(-60.002678),
+				0,
+				math.rad(180)
+			),
+	},
+}
+
+-- Cache the exact live MM2 display parts at startup when the player currently
+-- has these scanned weapons equipped. This means the WEP EQUIP buttons can
+-- keep using the exact objects even after MM2 changes WeaponDisplays later.
+-- Kept on WeaponPackRuntime so this large chunk does not spend extra
+-- top-level Luau local slots.
+WeaponPackRuntime.SCANNED_TRAVELER_SOURCE_CACHE = {}
+
+WeaponPackRuntime.captureScannedTravelerSources = function()
+	local folder = workspace:FindFirstChild("WeaponDisplays")
+	if not folder then
+		return
+	end
+
+	local gun = folder:FindFirstChild("GunDisplay")
+	if gun and gun:IsA("BasePart") then
+		local mesh = gun:FindFirstChildWhichIsA("SpecialMesh")
+		if mesh
+			and tostring(mesh.MeshId) == "rbxassetid://15090814396"
+			and tostring(mesh.TextureId) == "rbxassetid://132537117087610" then
+
+			local ok, clone = pcall(function() return gun:Clone() end)
+			if ok and clone then
+				clone.Parent = nil
+				WeaponPackRuntime.SCANNED_TRAVELER_SOURCE_CACHE[
+					"Chroma Traveler's Gun"
+				] = clone
+			end
+		end
+	end
+
+	local knife = folder:FindFirstChild("KnifeDisplay")
+	if knife and knife:IsA("MeshPart")
+		and tostring(knife.MeshId) == "rbxassetid://15057341638" then
+
+		local ok, clone = pcall(function() return knife:Clone() end)
+		if ok and clone then
+			clone.Parent = nil
+			WeaponPackRuntime.SCANNED_TRAVELER_SOURCE_CACHE[
+				"Traveler's Knife"
+			] = clone
+		end
+	end
+end
+
+WeaponPackRuntime.captureScannedTravelerSources()
+
+function WeaponPackRuntime.setMM2WeaponDisplayHidden(weaponType, hidden)
+	local folder = workspace:FindFirstChild("WeaponDisplays")
+	if not folder then
+		return false
+	end
+
+	local displayName =
+		weaponType == "Gun"
+		and "GunDisplay"
+		or "KnifeDisplay"
+
+	local display = folder:FindFirstChild(displayName)
+	if not display then
+		return false
+	end
+
+	local function setObject(object)
+		if object:IsA("BasePart") then
+			pcall(function()
+				object.LocalTransparencyModifier = hidden and 1 or 0
+			end)
+		elseif object:IsA("ParticleEmitter")
+			or object:IsA("Trail")
+			or object:IsA("Beam") then
+			pcall(function()
+				object.Enabled = not hidden
+			end)
+		end
+	end
+
+	setObject(display)
+	for _, object in ipairs(display:GetDescendants()) do
+		setObject(object)
+	end
+
+	return true
+end
+
+function WeaponPackRuntime.isScannedTravelerVisualHealthy(character, weaponName)
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+	if not character or not config then
+		return false
+	end
+
+	local model = character:FindFirstChild(config.ModelName)
+	return model ~= nil
+		and model:GetAttribute("ScannedTravelerWeapon") == weaponName
+		and model:FindFirstChild("Handle") ~= nil
+end
+
+function WeaponPackRuntime.buildScannedTravelerRoot(weaponName)
+	local visual = FALLBACK_WEAPON_VISUALS[weaponName]
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+	if not visual or not config then
+		return nil
+	end
+
+	-- First choice: clone MM2's exact live display when it still matches the
+	-- scanned asset. This preserves every mesh property MM2 supplied.
+	local displayFolder = workspace:FindFirstChild("WeaponDisplays")
+	local live = displayFolder and displayFolder:FindFirstChild(config.DisplayName)
+	local root = nil
+
+	local cachedSource =
+		WeaponPackRuntime.SCANNED_TRAVELER_SOURCE_CACHE[weaponName]
+
+	if cachedSource then
+		local ok, clone = pcall(function()
+			return cachedSource:Clone()
+		end)
+		if ok then
+			root = clone
+		end
+	end
+
+	if not root and live and live:IsA("BasePart") then
+		local matches = false
+
+		if live:IsA("MeshPart") then
+			matches = tostring(live.MeshId) == tostring(visual.MeshId)
+		else
+			local liveMesh = live:FindFirstChildWhichIsA("SpecialMesh")
+			matches = liveMesh ~= nil
+				and tostring(liveMesh.MeshId) == tostring(visual.MeshId)
+		end
+
+		if matches then
+			local ok, clone = pcall(function()
+				return live:Clone()
+			end)
+			if ok then
+				root = clone
+			end
+		end
+	end
+
+	-- Fallback: rebuild directly from the exact scanned IDs/dimensions.
+	if not root then
+		if visual.ScannedDisplayKind == "MeshPart" then
+			root = Instance.new("MeshPart")
+			root.Size = visual.PartSize
+			pcall(function() root.MeshId = visual.MeshId end)
+			pcall(function() root.TextureID = visual.TextureId end)
+		else
+			root = Instance.new("Part")
+			root.Size = visual.PartSize or Vector3.new(1,1,1)
+
+			local mesh = Instance.new("SpecialMesh")
+			mesh.MeshType = Enum.MeshType.FileMesh
+			mesh.MeshId = visual.MeshId
+			mesh.TextureId = visual.TextureId or ""
+			mesh.Scale = visual.Scale or Vector3.new(1,1,1)
+			mesh.Offset = visual.Offset or Vector3.zero
+			mesh.Parent = root
+		end
+	end
+
+	if not root then
+		return nil
+	end
+
+	-- IMPORTANT: normal Traveler and Chroma Traveler use the same base gun
+	-- geometry. A cached MM2 GunDisplay can therefore contain the NORMAL
+	-- Traveler texture even though this button is Chroma Traveler's Gun.
+	-- Always force the exact scanned appearance after cloning so a stale
+	-- WeaponDisplays cache can never downgrade the chroma into the normal gun.
+	if visual.ScannedDisplayKind == "MeshPart" and root:IsA("MeshPart") then
+		pcall(function() root.TextureID = visual.TextureId end)
+		root.Size = (visual.PartSize or root.Size) * (config.VisualScale or 1)
+		pcall(function() root.Color = Color3.new(1, 1, 1) end)
+	else
+		root.Size = visual.PartSize or root.Size
+
+		local exactMesh = root:FindFirstChildWhichIsA("SpecialMesh")
+		if not exactMesh then
+			exactMesh = Instance.new("SpecialMesh")
+			exactMesh.MeshType = Enum.MeshType.FileMesh
+			exactMesh.Parent = root
+		end
+
+		exactMesh.MeshType = Enum.MeshType.FileMesh
+		exactMesh.MeshId = visual.MeshId or exactMesh.MeshId
+		exactMesh.TextureId = visual.TextureId or exactMesh.TextureId
+		exactMesh.Scale = visual.Scale or exactMesh.Scale
+		exactMesh.Offset = visual.Offset or Vector3.zero
+		pcall(function() exactMesh.VertexColor = Vector3.new(1, 1, 1) end)
+		pcall(function() root.Color = Color3.new(1, 1, 1) end)
+	end
+
+	-- Remove any stale joints copied from Workspace.WeaponDisplays.
+	for _, child in ipairs(root:GetDescendants()) do
+		if child:IsA("Weld")
+			or child:IsA("Motor6D")
+			or child:IsA("WeldConstraint") then
+			child:Destroy()
+		end
+	end
+
+	root.Name = "Handle"
+	root.Anchored = false
+	root.CanCollide = false
+	root.CanTouch = false
+	root.CanQuery = false
+	root.Massless = true
+	root.LocalTransparencyModifier = 0
+
+	local weaponAttachment = root:FindFirstChild(config.WeaponAttachmentName)
+	if not weaponAttachment or not weaponAttachment:IsA("Attachment") then
+		if weaponAttachment then
+			weaponAttachment:Destroy()
+		end
+		weaponAttachment = Instance.new("Attachment")
+		weaponAttachment.Name = config.WeaponAttachmentName
+		weaponAttachment.CFrame = CFrame.new()
+		weaponAttachment.Parent = root
+	end
+
+	return root, weaponAttachment
+end
+
+function WeaponPackRuntime.applyScannedTravelerWeapon(character, weaponName)
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+	if not character or not config then
+		return false, "scanned Traveler weapon config missing"
+	end
+
+	if WeaponPackRuntime.isScannedTravelerVisualHealthy(character, weaponName) then
+		WeaponPackRuntime.setMM2WeaponDisplayHidden(config.Type, true)
+		-- MM2 can also keep a second original weapon host attached to the
+		-- character. Hide those native weapon parts while protecting every
+		-- ScriptOwnedWeapon model.
+		if WeaponPackRuntime.hideScannedOriginals then
+			WeaponPackRuntime.hideScannedOriginals(character)
+		end
+		return true
+	end
+
+	clearHolsteredWeapon(character, config.ModelName)
+
+	local torso = character:FindFirstChild("UpperTorso")
+		or character:FindFirstChild("Torso")
+		or character:FindFirstChild("LowerTorso")
+
+	if not torso or not torso:IsA("BasePart") then
+		return false, "torso missing"
+	end
+
+	local root, weaponAttachment =
+		WeaponPackRuntime.buildScannedTravelerRoot(weaponName)
+
+	if not root or not weaponAttachment then
+		return false, "could not build exact scanned weapon"
+	end
+
+	local model = Instance.new("Model")
+	model.Name = config.ModelName
+	model:SetAttribute("ScriptOwnedWeapon", true)
+	model:SetAttribute("ScannedTravelerWeapon", weaponName)
+	model:SetAttribute("WeaponName", weaponName)
+
+	root.Parent = model
+	model.PrimaryPart = root
+	model.Parent = character
+
+	local target = torso.CFrame * config.TorsoCFrame
+	root.CFrame = target * weaponAttachment.CFrame:Inverse()
+
+	local weld = Instance.new("Weld")
+	weld.Name = "ScannedTravelerWeld"
+	weld.Part0 = torso
+	weld.Part1 = root
+	weld.C0 = config.TorsoCFrame
+	weld.C1 = weaponAttachment.CFrame
+	weld.Parent = root
+
+	WeaponPackRuntime.setMM2WeaponDisplayHidden(config.Type, true)
+	if WeaponPackRuntime.hideScannedOriginals then
+		WeaponPackRuntime.hideScannedOriginals(character)
+	end
+	return true
+end
+
+-- Restore MM2's native display visibility whenever this fresh script starts.
+WeaponPackRuntime.setMM2WeaponDisplayHidden("Gun", false)
+WeaponPackRuntime.setMM2WeaponDisplayHidden("Knife", false)
+
 -- Gingerscope uses a UGC fallback mesh whose local axes are different
 -- from MM2 Harvester/Icepiercer. Keep its correction separate so tuning it
 -- never changes the working guns.
@@ -7647,8 +8065,16 @@ local WEAPON_HOLSTER_DATA = {
 
 	["Chroma Traveler's Gun"] = {
 		Placement = "WaistRight",
+		AttachmentPosition = Vector3.zero,
+		AttachmentOrientation = Vector3.zero,
 		Correction = CFrame.new(0.08, -0.18, 0.04)
 			* CFrame.Angles(0, math.rad(-5), math.rad(-10)),
+	},
+
+	["Traveler's Knife"] = {
+		Placement = "WaistLeft",
+		AttachmentPosition = Vector3.zero,
+		AttachmentOrientation = Vector3.zero,
 	},
 }
 
@@ -8297,6 +8723,10 @@ local function removeOriginalWeaponDisplays(character)
 	hideCharacterOriginalWeaponParts(character)
 	hideConnectedOriginalWeaponParts(character)
 end
+
+-- Earlier Traveler helpers are defined before this local function, so expose
+-- the mature original-weapon mask through the runtime table for those calls.
+WeaponPackRuntime.hideScannedOriginals = removeOriginalWeaponDisplays
 
 
 -- Gingerscope uses its own visible native waist accessory.
@@ -10444,6 +10874,22 @@ local function replaceCurrentEquippedWeaponMesh(character, weaponName, allowDeep
 		return false, "character missing"
 	end
 
+	-- The two Traveler weapons were captured directly from MM2's
+	-- Workspace.WeaponDisplays, which live outside Character. Use their
+	-- exact scanned display geometry instead of the older host-mesh search.
+	if WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName] then
+		stopRealWeaponHideLoop(character)
+
+		WeaponPackRuntime.currentReplacementPart = nil
+		WeaponPackRuntime.currentReplacementWeaponName = nil
+		WeaponPackRuntime.currentReplacementCharacter = nil
+
+		return WeaponPackRuntime.applyScannedTravelerWeapon(
+			character,
+			weaponName
+		)
+	end
+
 	-- Gingerscope is special: its fallback source is a real Waist Accessory.
 	-- Do NOT strip it into a SpecialMesh and do NOT rotate the MM2 host.
 	-- Just remember the real MM2 gun host, hide it locally, and attach the
@@ -10647,6 +11093,16 @@ equipPlayerWeapon = function(name)
 	if previousSlotName
 		and previousSlotName ~= wantedName then
 
+		local previousScanned =
+			WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[previousSlotName]
+
+		if previousScanned then
+			WeaponPackRuntime.setMM2WeaponDisplayHidden(
+				previousScanned.Type,
+				false
+			)
+		end
+
 		if wantedType == "Gun" then
 			-- Only remove gun cosmetics/persistence.
 			WeaponPackRuntime.selectedGunName = nil
@@ -10758,7 +11214,19 @@ equipPlayerWeapon = function(name)
 			wantedName
 		)
 
-	if wantedName == "Gingerscope" then
+	if WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[wantedName] then
+		-- Exact direct display is already welded to the correct slot.
+		-- Do not build the old generic gun backup on top of it.
+		if wantedType == "Gun" then
+			WeaponPackRuntime.destroyPersistentGunFallback()
+		end
+
+		WeaponPackRuntime.applyScannedTravelerWeapon(
+			character,
+			wantedName
+		)
+
+	elseif wantedName == "Gingerscope" then
 		WeaponPackRuntime.destroyPersistentGunFallback()
 
 		local nativeOk, nativeReason =
@@ -10825,6 +11293,9 @@ local function removePlayerWeaponReplacement()
 	selectedWeaponName = nil
 	WeaponPackRuntime.selectedGunName = nil
 	WeaponPackRuntime.selectedKnifeName = nil
+
+	WeaponPackRuntime.setMM2WeaponDisplayHidden("Gun", false)
+	WeaponPackRuntime.setMM2WeaponDisplayHidden("Knife", false)
 
 	WeaponPackRuntime.disconnectPlayerWeaponPersistence()
 
@@ -11236,6 +11707,33 @@ WeaponPackRuntime.setPersistentGunFallbackVisible =
 
 WeaponPackRuntime.ensurePersistentGunFallback =
 	function(character, weaponName, visible)
+		local scanned =
+			WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+
+		if scanned and scanned.Type == "Gun" then
+			if not character or character ~= player.Character then
+				return false
+			end
+
+			local ok =
+				WeaponPackRuntime.applyScannedTravelerWeapon(
+					character,
+					weaponName
+				)
+
+			local model = character:FindFirstChild(scanned.ModelName)
+			if model then
+				for _, object in ipairs(model:GetDescendants()) do
+					if object:IsA("BasePart") then
+						object.LocalTransparencyModifier = visible == false and 1 or 0
+					end
+				end
+			end
+
+			WeaponPackRuntime.setMM2WeaponDisplayHidden("Gun", true)
+			return ok == true
+		end
+
 		if weaponName == "Gingerscope" then
 			WeaponPackRuntime.destroyPersistentGunFallback()
 
@@ -11551,6 +12049,15 @@ WeaponPackRuntime.isCurrentReplacementAlive =
 
 WeaponPackRuntime.hideCurrentGunHost =
 	function(character, weaponName)
+		local scanned =
+			WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+
+		if scanned and scanned.Type == "Gun" then
+			WeaponPackRuntime.setMM2WeaponDisplayHidden("Gun", true)
+			removeOriginalWeaponDisplays(character)
+			return true
+		end
+
 		if weaponName == "Gingerscope" then
 			WeaponPackRuntime.enforceGingerscopeVisualIsolation(
 				character
@@ -12176,6 +12683,100 @@ RunService.Heartbeat:Connect(function()
 		true
 	)
 end)
+
+--------------------------------------------------
+-- EXACT TRAVELER DISPLAY GUARD
+-- Keeps both slots independent and restores the scanned visual if MM2
+-- rebuilds WeaponDisplays or the character changes during a round.
+--------------------------------------------------
+
+WeaponPackRuntime.nextScannedTravelerGuard = 0
+
+RunService.Heartbeat:Connect(function()
+	if time() < WeaponPackRuntime.nextScannedTravelerGuard then
+		return
+	end
+
+	WeaponPackRuntime.nextScannedTravelerGuard = time() + 0.25
+
+	local character = player.Character
+	if not character or not character.Parent then
+		return
+	end
+
+	local hasScannedTraveler = false
+
+	for _, weaponName in ipairs({
+		WeaponPackRuntime.selectedGunName,
+		WeaponPackRuntime.selectedKnifeName,
+	}) do
+		local config =
+			weaponName
+			and WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+
+		if config then
+			hasScannedTraveler = true
+
+			if not WeaponPackRuntime.isScannedTravelerVisualHealthy(
+				character,
+				weaponName
+			) then
+
+				WeaponPackRuntime.applyScannedTravelerWeapon(
+					character,
+					weaponName
+				)
+			end
+
+			WeaponPackRuntime.setMM2WeaponDisplayHidden(
+				config.Type,
+				true
+			)
+		end
+	end
+
+	-- Character-hosted MM2 weapon geometry only needs the mature scan a few
+	-- times per second. The cheap Workspace.WeaponDisplays mask below still
+	-- runs every rendered frame so the real gun cannot flash back in.
+	if hasScannedTraveler
+		and WeaponPackRuntime.hideScannedOriginals then
+
+		WeaponPackRuntime.hideScannedOriginals(character)
+	end
+end)
+
+-- MM2 updates WeaponDisplays from its own render code. A 0.25 second
+-- heartbeat guard is not enough because the original gun can become visible
+-- again between heartbeat passes. Re-apply the local mask at the end of every
+-- rendered frame while either exact Traveler slot is selected.
+pcall(function()
+	RunService:UnbindFromRenderStep("ScannedTravelerNativeMask")
+end)
+
+RunService:BindToRenderStep(
+	"ScannedTravelerNativeMask",
+	10020,
+	function()
+		local character = player.Character
+		if not character or not character.Parent then
+			return
+		end
+
+		local gunName = WeaponPackRuntime.selectedGunName
+		local knifeName = WeaponPackRuntime.selectedKnifeName
+		local gunConfig = gunName and WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[gunName]
+		local knifeConfig = knifeName and WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[knifeName]
+
+		if gunConfig and gunConfig.Type == "Gun" then
+			WeaponPackRuntime.setMM2WeaponDisplayHidden("Gun", true)
+		end
+
+		if knifeConfig and knifeConfig.Type == "Knife" then
+			WeaponPackRuntime.setMM2WeaponDisplayHidden("Knife", true)
+		end
+
+	end
+)
 
 --------------------------------------------------
 -- ROUND TRANSITION WEAPON WATCH
@@ -15139,4 +15740,1688 @@ player.CharacterAdded:Connect(function(character)
 
 	end
 
+end)
+
+--------------------------------------------------
+-- TRAVELER HARD FIX V45
+--
+-- V44's symptoms (normal-looking Traveler gun, huge axe, and the original
+-- MM2 gun still visible) all come from treating Workspace.WeaponDisplays as
+-- a passive source. MM2 actively rewrites those display objects.
+--
+-- V45 makes our two Traveler visuals deterministic and hard-masks the MM2
+-- display every rendered frame. It also gives Chroma Traveler's Gun a live
+-- chroma tint and uses a much smaller dedicated axe size.
+--------------------------------------------------
+
+WeaponPackRuntime.TRAVELER_V45_ACTIVE = true
+WeaponPackRuntime.TRAVELER_V45_KNIFE_SCALE = 0.18
+WeaponPackRuntime.TRAVELER_V45_GUN_TEXTURE = "rbxassetid://132537117087610"
+WeaponPackRuntime.TRAVELER_V45_GUN_MESH = "rbxassetid://15090814396"
+WeaponPackRuntime.TRAVELER_V45_KNIFE_TEXTURE = "rbxassetid://15057460725"
+WeaponPackRuntime.TRAVELER_V45_KNIFE_MESH = "rbxassetid://15057341638"
+
+-- Stronger than LocalTransparencyModifier alone. MM2 can rewrite the display
+-- every frame, so save its original transparency once and force both local
+-- and normal transparency while our replacement is selected.
+WeaponPackRuntime.setMM2WeaponDisplayHidden = function(weaponType, hidden)
+	local folder = workspace:FindFirstChild("WeaponDisplays")
+	if not folder then
+		return false
+	end
+
+	local display = folder:FindFirstChild(
+		weaponType == "Gun" and "GunDisplay" or "KnifeDisplay"
+	)
+	if not display then
+		return false
+	end
+
+	local function setObject(object)
+		if object:IsA("BasePart") then
+			if object:GetAttribute("TravelerV45OriginalTransparency") == nil then
+				pcall(function()
+					object:SetAttribute(
+						"TravelerV45OriginalTransparency",
+						object.Transparency
+					)
+				end)
+			end
+
+			if hidden then
+				pcall(function() object.LocalTransparencyModifier = 1 end)
+				pcall(function() object.Transparency = 1 end)
+				pcall(function() object.CastShadow = false end)
+			else
+				pcall(function() object.LocalTransparencyModifier = 0 end)
+				pcall(function()
+					local oldTransparency = object:GetAttribute(
+						"TravelerV45OriginalTransparency"
+					)
+					object.Transparency =
+						type(oldTransparency) == "number"
+						and oldTransparency
+						or 0
+				end)
+			end
+		elseif object:IsA("ParticleEmitter")
+			or object:IsA("Trail")
+			or object:IsA("Beam")
+			or object:IsA("Smoke")
+			or object:IsA("Fire")
+			or object:IsA("Sparkles") then
+			pcall(function() object.Enabled = not hidden end)
+		elseif object:IsA("Decal")
+			or object:IsA("Texture") then
+			pcall(function() object.Transparency = hidden and 1 or 0 end)
+		end
+	end
+
+	setObject(display)
+	for _, object in ipairs(display:GetDescendants()) do
+		setObject(object)
+	end
+
+	return true
+end
+
+-- Build from scratch instead of cloning an MM2 display that the game can
+-- mutate. This also guarantees the V45 axe scale is actually applied.
+WeaponPackRuntime.buildScannedTravelerRoot = function(weaponName)
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+	if not config then
+		return nil
+	end
+
+	local root
+	local weaponAttachment
+
+	if weaponName == "Chroma Traveler's Gun" then
+		root = Instance.new("Part")
+		root.Name = "Handle"
+		root.Size = Vector3.new(0.20000, 1.83000, 1.03000)
+		root.Color = Color3.new(1, 1, 1)
+		root.Material = Enum.Material.Plastic
+		root.Transparency = 0
+
+		local mesh = Instance.new("SpecialMesh")
+		mesh.Name = "TravelerV45Mesh"
+		mesh.MeshType = Enum.MeshType.FileMesh
+		mesh.MeshId = WeaponPackRuntime.TRAVELER_V45_GUN_MESH
+		mesh.TextureId = WeaponPackRuntime.TRAVELER_V45_GUN_TEXTURE
+		mesh.Scale = Vector3.new(0.04990, 0.04990, 0.04990)
+		mesh.Offset = Vector3.zero
+		mesh.VertexColor = Vector3.new(1, 1, 1)
+		mesh.Parent = root
+
+		weaponAttachment = Instance.new("Attachment")
+		weaponAttachment.Name = "GunWeaponAttachment"
+		weaponAttachment.CFrame = CFrame.new()
+		weaponAttachment.Parent = root
+	else
+		root = Instance.new("MeshPart")
+		root.Name = "Handle"
+		root.Size = Vector3.new(0.60441, 3.40600, 2.18736)
+			* WeaponPackRuntime.TRAVELER_V45_KNIFE_SCALE
+		root.Color = Color3.new(1, 1, 1)
+		root.Material = Enum.Material.Plastic
+		root.Transparency = 0
+
+		pcall(function()
+			root.MeshId = WeaponPackRuntime.TRAVELER_V45_KNIFE_MESH
+		end)
+		pcall(function()
+			root.TextureID = WeaponPackRuntime.TRAVELER_V45_KNIFE_TEXTURE
+		end)
+
+		-- Re-apply after MeshId because Roblox may refresh MeshPart bounds when
+		-- a mesh is assigned to a newly-created MeshPart.
+		root.Size = Vector3.new(0.60441, 3.40600, 2.18736)
+			* WeaponPackRuntime.TRAVELER_V45_KNIFE_SCALE
+
+		weaponAttachment = Instance.new("Attachment")
+		weaponAttachment.Name = "KnifeWeaponAttachment"
+		weaponAttachment.CFrame = CFrame.new()
+		weaponAttachment.Parent = root
+	end
+
+	root.Anchored = false
+	root.CanCollide = false
+	root.CanTouch = false
+	root.CanQuery = false
+	root.Massless = true
+	root.LocalTransparencyModifier = 0
+	root:SetAttribute("TravelerV45Root", true)
+
+	return root, weaponAttachment
+end
+
+WeaponPackRuntime.applyScannedTravelerWeapon = function(character, weaponName)
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+	if not character or not config then
+		return false, "Traveler V45 config missing"
+	end
+
+	-- Always rebuild if this is an older V43/V44 Traveler model. This prevents
+	-- an already-existing giant axe or normal-texture gun from being accepted
+	-- as healthy simply because its model name matches.
+	local oldModel = character:FindFirstChild(config.ModelName)
+	if oldModel then
+		local oldRoot = oldModel:FindFirstChild("Handle")
+		if oldModel:GetAttribute("TravelerV45") ~= true
+			or not oldRoot
+			or oldRoot:GetAttribute("TravelerV45Root") ~= true then
+			oldModel:Destroy()
+		else
+			WeaponPackRuntime.setMM2WeaponDisplayHidden(config.Type, true)
+			if WeaponPackRuntime.hideScannedOriginals then
+				WeaponPackRuntime.hideScannedOriginals(character)
+			end
+			return true
+		end
+	end
+
+	clearHolsteredWeapon(character, config.ModelName)
+
+	local torso = character:FindFirstChild("UpperTorso")
+		or character:FindFirstChild("Torso")
+		or character:FindFirstChild("LowerTorso")
+
+	if not torso or not torso:IsA("BasePart") then
+		return false, "torso missing"
+	end
+
+	local root, weaponAttachment =
+		WeaponPackRuntime.buildScannedTravelerRoot(weaponName)
+
+	if not root or not weaponAttachment then
+		return false, "Traveler V45 root build failed"
+	end
+
+	local model = Instance.new("Model")
+	model.Name = config.ModelName
+	model:SetAttribute("ScriptOwnedWeapon", true)
+	model:SetAttribute("ScannedTravelerWeapon", weaponName)
+	model:SetAttribute("WeaponName", weaponName)
+	model:SetAttribute("TravelerV45", true)
+
+	root.Parent = model
+	model.PrimaryPart = root
+	model.Parent = character
+
+	root.CFrame =
+		torso.CFrame
+		* config.TorsoCFrame
+		* weaponAttachment.CFrame:Inverse()
+
+	local weld = Instance.new("Weld")
+	weld.Name = "TravelerV45Weld"
+	weld.Part0 = torso
+	weld.Part1 = root
+	weld.C0 = config.TorsoCFrame
+	weld.C1 = weaponAttachment.CFrame
+	weld.Parent = root
+
+	WeaponPackRuntime.setMM2WeaponDisplayHidden(config.Type, true)
+	if WeaponPackRuntime.hideScannedOriginals then
+		WeaponPackRuntime.hideScannedOriginals(character)
+	end
+
+	return true
+end
+
+WeaponPackRuntime.isScannedTravelerVisualHealthy = function(character, weaponName)
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+	if not character or not config then
+		return false
+	end
+
+	local model = character:FindFirstChild(config.ModelName)
+	local root = model and model:FindFirstChild("Handle")
+
+	return model ~= nil
+		and model:GetAttribute("TravelerV45") == true
+		and model:GetAttribute("ScannedTravelerWeapon") == weaponName
+		and root ~= nil
+		and root:GetAttribute("TravelerV45Root") == true
+end
+
+-- Replace V44's old display mask with a final V45 pass. This runs after MM2's
+-- own visual update and after the old Traveler guard.
+pcall(function()
+	RunService:UnbindFromRenderStep("TravelerV45HardGuard")
+end)
+
+RunService:BindToRenderStep(
+	"TravelerV45HardGuard",
+	10040,
+	function()
+		local character = player.Character
+		if not character or not character.Parent then
+			return
+		end
+
+		local gunSelected =
+			WeaponPackRuntime.selectedGunName == "Chroma Traveler's Gun"
+		local knifeSelected =
+			WeaponPackRuntime.selectedKnifeName == "Traveler's Knife"
+
+		if gunSelected then
+			WeaponPackRuntime.setMM2WeaponDisplayHidden("Gun", true)
+
+			local gunModel = character:FindFirstChild("HolsteredGun")
+			local gunRoot = gunModel and gunModel:FindFirstChild("Handle")
+			local gunMesh = gunRoot and gunRoot:FindFirstChildWhichIsA("SpecialMesh")
+
+			if not gunModel
+				or gunModel:GetAttribute("TravelerV45") ~= true
+				or not gunRoot
+				or not gunMesh then
+				WeaponPackRuntime.applyScannedTravelerWeapon(
+					character,
+					"Chroma Traveler's Gun"
+				)
+			else
+				-- Force the scanned chroma asset every frame. A stale normal
+				-- Traveler texture can no longer overwrite this model.
+				gunRoot.Transparency = 0
+				gunRoot.LocalTransparencyModifier = 0
+				gunRoot.Size = Vector3.new(0.20000, 1.83000, 1.03000)
+				gunMesh.MeshId = WeaponPackRuntime.TRAVELER_V45_GUN_MESH
+				gunMesh.TextureId = WeaponPackRuntime.TRAVELER_V45_GUN_TEXTURE
+				gunMesh.Scale = Vector3.new(0.04990, 0.04990, 0.04990)
+
+				-- Chroma Traveler's Gun is visibly chromatic. Keep the exact
+				-- scanned texture, and add a live chroma tint so it can never
+				-- fall back to the plain yellow/orange Traveler appearance.
+				local chroma = Color3.fromHSV(
+					(time() * 0.16) % 1,
+					0.72,
+					1
+				)
+				gunMesh.VertexColor = Vector3.new(
+					0.55 + chroma.R * 0.45,
+					0.55 + chroma.G * 0.45,
+					0.55 + chroma.B * 0.45
+				)
+			end
+		end
+
+		if knifeSelected then
+			WeaponPackRuntime.setMM2WeaponDisplayHidden("Knife", true)
+
+			local knifeModel = character:FindFirstChild("HolsteredKnife")
+			local knifeRoot = knifeModel and knifeModel:FindFirstChild("Handle")
+
+			if not knifeModel
+				or knifeModel:GetAttribute("TravelerV45") ~= true
+				or not knifeRoot
+				or not knifeRoot:IsA("MeshPart") then
+				WeaponPackRuntime.applyScannedTravelerWeapon(
+					character,
+					"Traveler's Knife"
+				)
+			else
+				knifeRoot.Transparency = 0
+				knifeRoot.LocalTransparencyModifier = 0
+				pcall(function()
+					knifeRoot.TextureID =
+						WeaponPackRuntime.TRAVELER_V45_KNIFE_TEXTURE
+				end)
+				knifeRoot.Size =
+					Vector3.new(0.60441, 3.40600, 2.18736)
+					* WeaponPackRuntime.TRAVELER_V45_KNIFE_SCALE
+			end
+		end
+
+		if gunSelected or knifeSelected then
+			if WeaponPackRuntime.hideScannedOriginals then
+				WeaponPackRuntime.hideScannedOriginals(character)
+			end
+		end
+	end
+)
+
+-- Visible proof that this exact build (not V43/V44 or an old remote copy)
+-- is the one currently running.
+pcall(function()
+	weaponStatus.Text = "V45 HARD FIX ACTIVE"
+	weaponStatus.TextColor3 = Color3.fromRGB(90, 235, 130)
+end)
+
+--------------------------------------------------
+-- TRAVELER REAL POSITION + SMALL AXE V46
+--
+-- V46 stops guessing the holster rotation for the two scanned Traveler
+-- visuals.  When MM2's real Workspace.WeaponDisplays object is available,
+-- capture its exact CFrame relative to the player's torso BEFORE hiding it
+-- and reuse that transform for our replacement.
+--
+-- The axe mesh from the display has unusual bounds when recreated as a new
+-- MeshPart, so use a much smaller visual size than V45.
+--------------------------------------------------
+
+WeaponPackRuntime.TRAVELER_V46_ACTIVE = true
+WeaponPackRuntime.TRAVELER_V46_KNIFE_SCALE = 0.035
+WeaponPackRuntime.TRAVELER_V46_NATIVE_OFFSETS =
+	WeaponPackRuntime.TRAVELER_V46_NATIVE_OFFSETS or {}
+
+WeaponPackRuntime.captureTravelerV46NativeOffset = function(character, weaponType)
+	if not character then
+		return nil
+	end
+
+	local torso = character:FindFirstChild("UpperTorso")
+		or character:FindFirstChild("Torso")
+		or character:FindFirstChild("LowerTorso")
+	if not torso or not torso:IsA("BasePart") then
+		return nil
+	end
+
+	local folder = workspace:FindFirstChild("WeaponDisplays")
+	local display = folder and folder:FindFirstChild(
+		weaponType == "Gun" and "GunDisplay" or "KnifeDisplay"
+	)
+
+	if display and display:IsA("BasePart") then
+		-- Only trust the display when it is actually sitting by this character.
+		-- This prevents a lobby/showcase display elsewhere in the map from being
+		-- mistaken for the player's holstered weapon.
+		if (display.Position - torso.Position).Magnitude <= 10 then
+			WeaponPackRuntime.TRAVELER_V46_NATIVE_OFFSETS[weaponType] =
+				torso.CFrame:ToObjectSpace(display.CFrame)
+		end
+	end
+
+	return WeaponPackRuntime.TRAVELER_V46_NATIVE_OFFSETS[weaponType]
+end
+
+-- Preserve the deterministic V45 mesh builder, then correct only the axe
+-- dimensions.  The gun geometry stays exactly as V45 built it.
+WeaponPackRuntime.TRAVELER_V46_BUILD_BASE =
+	WeaponPackRuntime.TRAVELER_V46_BUILD_BASE
+	or WeaponPackRuntime.buildScannedTravelerRoot
+
+WeaponPackRuntime.buildScannedTravelerRoot = function(weaponName)
+	local root, weaponAttachment =
+		WeaponPackRuntime.TRAVELER_V46_BUILD_BASE(weaponName)
+
+	if weaponName == "Traveler's Knife"
+		and root
+		and root:IsA("MeshPart") then
+		root.Size =
+			Vector3.new(0.60441, 3.40600, 2.18736)
+			* WeaponPackRuntime.TRAVELER_V46_KNIFE_SCALE
+		root:SetAttribute("TravelerV46Scaled", true)
+	end
+
+	if root then
+		root:SetAttribute("TravelerV46Root", true)
+	end
+
+	return root, weaponAttachment
+end
+
+WeaponPackRuntime.applyScannedTravelerWeapon = function(character, weaponName)
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+	if not character or not config then
+		return false, "Traveler V46 config missing"
+	end
+
+	-- Capture MM2's true on-character transform before masking its display.
+	local nativeOffset =
+		WeaponPackRuntime.captureTravelerV46NativeOffset(character, config.Type)
+		or config.TorsoCFrame
+
+	-- The scanned Traveler gun display is rolled upside-down when its raw
+	-- Workspace display CFrame is reused directly on the torso. Flip only the
+	-- gun 180 degrees around its local Z axis; the axe keeps its native pose.
+	if config.Type == "Gun" then
+		nativeOffset = nativeOffset * CFrame.Angles(0, 0, math.rad(180))
+	end
+
+	local existing = character:FindFirstChild(config.ModelName)
+	if existing then
+		local existingRoot = existing:FindFirstChild("Handle")
+		local existingWeld = existingRoot
+			and existingRoot:FindFirstChild("TravelerV46Weld")
+
+		if existing:GetAttribute("TravelerV46") == true
+			and existingRoot
+			and existingWeld
+			and existingWeld:IsA("Weld") then
+
+			existingWeld.C0 = nativeOffset
+			existingWeld.C1 = CFrame.new()
+
+			if weaponName == "Traveler's Knife"
+				and existingRoot:IsA("MeshPart") then
+				existingRoot.Size =
+					Vector3.new(0.60441, 3.40600, 2.18736)
+					* WeaponPackRuntime.TRAVELER_V46_KNIFE_SCALE
+			end
+
+			WeaponPackRuntime.setMM2WeaponDisplayHidden(config.Type, true)
+			if WeaponPackRuntime.hideScannedOriginals then
+				WeaponPackRuntime.hideScannedOriginals(character)
+			end
+			return true
+		end
+
+		existing:Destroy()
+	end
+
+	clearHolsteredWeapon(character, config.ModelName)
+
+	local torso = character:FindFirstChild("UpperTorso")
+		or character:FindFirstChild("Torso")
+		or character:FindFirstChild("LowerTorso")
+	if not torso or not torso:IsA("BasePart") then
+		return false, "torso missing"
+	end
+
+	local root, weaponAttachment =
+		WeaponPackRuntime.buildScannedTravelerRoot(weaponName)
+	if not root then
+		return false, "Traveler V46 root build failed"
+	end
+
+	local model = Instance.new("Model")
+	model.Name = config.ModelName
+	model:SetAttribute("ScriptOwnedWeapon", true)
+	model:SetAttribute("ScannedTravelerWeapon", weaponName)
+	model:SetAttribute("WeaponName", weaponName)
+	model:SetAttribute("TravelerV45", true)
+	model:SetAttribute("TravelerV46", true)
+
+	root.Parent = model
+	model.PrimaryPart = root
+	model.Parent = character
+
+	-- Put the replacement at the exact position/orientation occupied by MM2's
+	-- own display, then weld with that same torso-relative transform.
+	root.CFrame = torso.CFrame * nativeOffset
+
+	local weld = Instance.new("Weld")
+	weld.Name = "TravelerV46Weld"
+	weld.Part0 = torso
+	weld.Part1 = root
+	weld.C0 = nativeOffset
+	weld.C1 = CFrame.new()
+	weld.Parent = root
+
+	WeaponPackRuntime.setMM2WeaponDisplayHidden(config.Type, true)
+	if WeaponPackRuntime.hideScannedOriginals then
+		WeaponPackRuntime.hideScannedOriginals(character)
+	end
+
+	return true
+end
+
+WeaponPackRuntime.isScannedTravelerVisualHealthy = function(character, weaponName)
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+	if not character or not config then
+		return false
+	end
+
+	local model = character:FindFirstChild(config.ModelName)
+	local root = model and model:FindFirstChild("Handle")
+	local weld = root and root:FindFirstChild("TravelerV46Weld")
+
+	return model ~= nil
+		and model:GetAttribute("TravelerV46") == true
+		and model:GetAttribute("ScannedTravelerWeapon") == weaponName
+		and root ~= nil
+		and root:GetAttribute("TravelerV46Root") == true
+		and weld ~= nil
+end
+
+-- Replace V45's guard so V45 can no longer restore its larger axe size or its
+-- guessed torso transform after V46 corrects them.
+pcall(function()
+	RunService:UnbindFromRenderStep("TravelerV45HardGuard")
+	RunService:UnbindFromRenderStep("TravelerV46RealPositionGuard")
+end)
+
+RunService:BindToRenderStep(
+	"TravelerV46RealPositionGuard",
+	10050,
+	function()
+		local character = player.Character
+		if not character or not character.Parent then
+			return
+		end
+
+		local gunSelected =
+			WeaponPackRuntime.selectedGunName == "Chroma Traveler's Gun"
+		local knifeSelected =
+			WeaponPackRuntime.selectedKnifeName == "Traveler's Knife"
+
+		if gunSelected then
+			local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[
+				"Chroma Traveler's Gun"
+			]
+
+			WeaponPackRuntime.captureTravelerV46NativeOffset(character, "Gun")
+			WeaponPackRuntime.setMM2WeaponDisplayHidden("Gun", true)
+
+			if not WeaponPackRuntime.isScannedTravelerVisualHealthy(
+				character,
+				"Chroma Traveler's Gun"
+			) then
+				WeaponPackRuntime.applyScannedTravelerWeapon(
+					character,
+					"Chroma Traveler's Gun"
+				)
+			else
+				local model = character:FindFirstChild(config.ModelName)
+				local root = model and model:FindFirstChild("Handle")
+				local weld = root and root:FindFirstChild("TravelerV46Weld")
+				local mesh = root and root:FindFirstChildWhichIsA("SpecialMesh")
+				local offset = WeaponPackRuntime.TRAVELER_V46_NATIVE_OFFSETS.Gun
+					or config.TorsoCFrame
+				offset = offset * CFrame.Angles(0, 0, math.rad(180))
+
+				if weld and weld:IsA("Weld") then
+					weld.C0 = offset
+					weld.C1 = CFrame.new()
+				end
+
+				if root then
+					root.Transparency = 0
+					root.LocalTransparencyModifier = 0
+				end
+
+				if mesh then
+					mesh.MeshId = WeaponPackRuntime.TRAVELER_V45_GUN_MESH
+					mesh.TextureId = WeaponPackRuntime.TRAVELER_V45_GUN_TEXTURE
+					mesh.Scale = Vector3.new(0.04990, 0.04990, 0.04990)
+					-- Do not fake a chroma color anymore. The scanned texture is
+					-- preserved as-is; V46's priority is the exact real placement.
+					mesh.VertexColor = Vector3.new(1, 1, 1)
+				end
+			end
+		end
+
+		if knifeSelected then
+			local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[
+				"Traveler's Knife"
+			]
+
+			WeaponPackRuntime.captureTravelerV46NativeOffset(character, "Knife")
+			WeaponPackRuntime.setMM2WeaponDisplayHidden("Knife", true)
+
+			if not WeaponPackRuntime.isScannedTravelerVisualHealthy(
+				character,
+				"Traveler's Knife"
+			) then
+				WeaponPackRuntime.applyScannedTravelerWeapon(
+					character,
+					"Traveler's Knife"
+				)
+			else
+				local model = character:FindFirstChild(config.ModelName)
+				local root = model and model:FindFirstChild("Handle")
+				local weld = root and root:FindFirstChild("TravelerV46Weld")
+				local offset = WeaponPackRuntime.TRAVELER_V46_NATIVE_OFFSETS.Knife
+					or config.TorsoCFrame
+
+				if weld and weld:IsA("Weld") then
+					weld.C0 = offset
+					weld.C1 = CFrame.new()
+				end
+
+				if root and root:IsA("MeshPart") then
+					root.Transparency = 0
+					root.LocalTransparencyModifier = 0
+					root.Size =
+						Vector3.new(0.60441, 3.40600, 2.18736)
+						* WeaponPackRuntime.TRAVELER_V46_KNIFE_SCALE
+					pcall(function()
+						root.TextureID =
+							WeaponPackRuntime.TRAVELER_V45_KNIFE_TEXTURE
+					end)
+				end
+			end
+		end
+
+		if gunSelected or knifeSelected then
+			if WeaponPackRuntime.hideScannedOriginals then
+				WeaponPackRuntime.hideScannedOriginals(character)
+			end
+		end
+	end
+)
+
+pcall(function()
+	weaponStatus.Text = "V46 REAL POSITION ACTIVE"
+	weaponStatus.TextColor3 = Color3.fromRGB(90, 235, 130)
+end)
+
+--------------------------------------------------
+-- TRAVELER SAFE AXE HOTFIX V47
+--
+-- V46 recreated Traveler's Knife as a MeshPart and repeatedly wrote its Size.
+-- On some clients/executors that mesh can trigger a client crash when equipped.
+-- V47 avoids MeshPart physics entirely: the axe is rendered with a normal,
+-- tiny non-colliding Part + SpecialMesh, while V46's real MM2 torso offset is
+-- still used for placement. No per-frame Size writes are needed.
+--------------------------------------------------
+
+WeaponPackRuntime.TRAVELER_V47_ACTIVE = true
+WeaponPackRuntime.TRAVELER_V47_KNIFE_MESH_SCALE = Vector3.new(0.07800, 0.07800, 0.07800)
+
+-- Save the final V46 implementations before overriding them.
+WeaponPackRuntime.TRAVELER_V47_BUILD_BASE =
+	WeaponPackRuntime.TRAVELER_V47_BUILD_BASE
+	or WeaponPackRuntime.buildScannedTravelerRoot
+
+WeaponPackRuntime.TRAVELER_V47_APPLY_BASE =
+	WeaponPackRuntime.TRAVELER_V47_APPLY_BASE
+	or WeaponPackRuntime.applyScannedTravelerWeapon
+
+WeaponPackRuntime.TRAVELER_V47_HEALTH_BASE =
+	WeaponPackRuntime.TRAVELER_V47_HEALTH_BASE
+	or WeaponPackRuntime.isScannedTravelerVisualHealthy
+
+WeaponPackRuntime.buildScannedTravelerRoot = function(weaponName)
+	if weaponName ~= "Traveler's Knife" then
+		return WeaponPackRuntime.TRAVELER_V47_BUILD_BASE(weaponName)
+	end
+
+	-- IMPORTANT: do not create a MeshPart here. The actual visual mesh lives in
+	-- SpecialMesh only; the physical root remains a tiny ordinary Part.
+	local root = Instance.new("Part")
+	root.Name = "Handle"
+	root.Size = Vector3.new(0.20, 1.20, 0.70)
+	root.Color = Color3.new(1, 1, 1)
+	root.Material = Enum.Material.Plastic
+	root.Transparency = 0
+	root.LocalTransparencyModifier = 0
+	root.Anchored = false
+	root.CanCollide = false
+	root.CanTouch = false
+	root.CanQuery = false
+	root.Massless = true
+
+	local mesh = Instance.new("SpecialMesh")
+	mesh.Name = "TravelerV47KnifeMesh"
+	mesh.MeshType = Enum.MeshType.FileMesh
+	mesh.MeshId = WeaponPackRuntime.TRAVELER_V45_KNIFE_MESH
+	mesh.TextureId = WeaponPackRuntime.TRAVELER_V45_KNIFE_TEXTURE
+	mesh.Scale = WeaponPackRuntime.TRAVELER_V47_KNIFE_MESH_SCALE
+	mesh.Offset = Vector3.zero
+	mesh.VertexColor = Vector3.new(1, 1, 1)
+	mesh.Parent = root
+
+	local attachment = Instance.new("Attachment")
+	attachment.Name = "KnifeWeaponAttachment"
+	attachment.CFrame = CFrame.new()
+	attachment.Parent = root
+
+	root:SetAttribute("TravelerV45Root", true)
+	root:SetAttribute("TravelerV46Root", true)
+	root:SetAttribute("TravelerV47SafeRoot", true)
+
+	return root, attachment
+end
+
+WeaponPackRuntime.applyScannedTravelerWeapon = function(character, weaponName)
+	if weaponName == "Traveler's Knife" and character then
+		local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+		local existing = config and character:FindFirstChild(config.ModelName)
+		local existingRoot = existing and existing:FindFirstChild("Handle")
+
+		-- Force any V43-V46 MeshPart axe to disappear before V46's generic apply
+		-- can accept it as already valid.
+		if existing
+			and (
+				not existingRoot
+				or existingRoot:IsA("MeshPart")
+				or existingRoot:GetAttribute("TravelerV47SafeRoot") ~= true
+			) then
+			pcall(function()
+				existing:Destroy()
+			end)
+		end
+	end
+
+	local ok, reason = WeaponPackRuntime.TRAVELER_V47_APPLY_BASE(
+		character,
+		weaponName
+	)
+
+	if ok and weaponName == "Traveler's Knife" and character then
+		local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+		local model = config and character:FindFirstChild(config.ModelName)
+		local root = model and model:FindFirstChild("Handle")
+		if model and root and root:GetAttribute("TravelerV47SafeRoot") == true then
+			model:SetAttribute("TravelerV47", true)
+		end
+	end
+
+	return ok, reason
+end
+
+WeaponPackRuntime.isScannedTravelerVisualHealthy = function(character, weaponName)
+	if weaponName ~= "Traveler's Knife" then
+		return WeaponPackRuntime.TRAVELER_V47_HEALTH_BASE(character, weaponName)
+	end
+
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+	if not character or not config then
+		return false
+	end
+
+	local model = character:FindFirstChild(config.ModelName)
+	local root = model and model:FindFirstChild("Handle")
+	local weld = root and root:FindFirstChild("TravelerV46Weld")
+	local mesh = root and root:FindFirstChild("TravelerV47KnifeMesh")
+
+	return model ~= nil
+		and model:GetAttribute("TravelerV47") == true
+		and model:GetAttribute("ScannedTravelerWeapon") == weaponName
+		and root ~= nil
+		and root:IsA("Part")
+		and root:GetAttribute("TravelerV47SafeRoot") == true
+		and mesh ~= nil
+		and mesh:IsA("SpecialMesh")
+		and weld ~= nil
+end
+
+-- V46's render guard is still useful for the exact native position, but its
+-- knife branch only performs the dangerous Size write when Handle is a
+-- MeshPart. V47's Handle is a normal Part, so that branch is skipped.
+-- Destroy an old unsafe axe immediately if this file is executed over V46.
+pcall(function()
+	local character = player.Character
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS["Traveler's Knife"]
+	local model = character and config and character:FindFirstChild(config.ModelName)
+	local root = model and model:FindFirstChild("Handle")
+	if root and root:IsA("MeshPart") then
+		model:Destroy()
+	end
+end)
+
+pcall(function()
+	weaponStatus.Text = "V47 SAFE AXE ACTIVE"
+	weaponStatus.TextColor3 = Color3.fromRGB(90, 235, 130)
+end)
+
+
+--------------------------------------------------
+-- TRAVELER SIZE + ORIENTATION FIX V50
+--------------------------------------------------
+-- V50 keeps V47's crash-safe Part + SpecialMesh axe, increases only its
+-- visual mesh scale, flips the Traveler gun upright, and preserves Corrupt
+-- at 74-97 in the realistic spawner.
+pcall(function()
+	weaponStatus.Text = "V50 TRAVELER FIX ACTIVE"
+	weaponStatus.TextColor3 = Color3.fromRGB(90, 235, 130)
+end)
+
+--------------------------------------------------
+-- TRAVELER STABILITY / DUPLICATE / REMOVE FIX V52
+--
+-- Fixes three problems from the stacked V45-V50 hotfixes:
+--   1) the axe no longer spawns huge and then shrinks;
+--   2) old Traveler heartbeat guards cannot race and create duplicates;
+--   3) REMOVE deletes HolsteredGun/HolsteredKnife Traveler models too.
+--
+-- The axe stays on the crash-safe Part + SpecialMesh path and is built at its
+-- final size immediately. V55 keeps the tuned axe and uses MM2's real GunTorsoAttachment
+-- transform directly for the Traveler gun, with no extra 180-degree flip.
+--------------------------------------------------
+
+WeaponPackRuntime.TRAVELER_V51_ACTIVE = true
+WeaponPackRuntime.TRAVELER_V51_AXE_SCALE = Vector3.new(0.08400, 0.08400, 0.08400)
+WeaponPackRuntime.TRAVELER_V53_KNIFE_OFFSET = CFrame.new(0, 0.06, 0)
+-- Traveler gun holster tuning. V63 force-applies +5 degrees while keeping
+-- the same hip position and the V62 live-weld enforcement.
+WeaponPackRuntime.TRAVELER_V63_GUN_CFRAME = CFrame.new(1.26, -1.50, 0.20)
+	* CFrame.Angles(math.rad(5.0), math.rad(180), math.rad(180))
+WeaponPackRuntime.TRAVELER_V51_APPLY_LOCKS =
+	WeaponPackRuntime.TRAVELER_V51_APPLY_LOCKS or {}
+
+-- Stop every named render guard from the older Traveler attempts. Anonymous
+-- heartbeat guards from already-executed older files cannot be disconnected,
+-- so the V51 apply lock + cheap health check below makes those harmless.
+pcall(function() RunService:UnbindFromRenderStep("ScannedTravelerNativeMask") end)
+pcall(function() RunService:UnbindFromRenderStep("TravelerV45HardGuard") end)
+pcall(function() RunService:UnbindFromRenderStep("TravelerV46RealPositionGuard") end)
+pcall(function() RunService:UnbindFromRenderStep("TravelerV51NativeMask") end)
+
+-- Old guards call the expensive connected-parts scanner several times per
+-- second. Throttle that shared runtime function globally so repeated script
+-- executions cannot make the whole client lag.
+if not WeaponPackRuntime.TRAVELER_V51_HIDE_BASE then
+	WeaponPackRuntime.TRAVELER_V51_HIDE_BASE =
+		WeaponPackRuntime.hideScannedOriginals
+end
+WeaponPackRuntime.TRAVELER_V51_NEXT_HIDE = 0
+WeaponPackRuntime.hideScannedOriginals = function(character)
+	if time() < (WeaponPackRuntime.TRAVELER_V51_NEXT_HIDE or 0) then
+		return
+	end
+	WeaponPackRuntime.TRAVELER_V51_NEXT_HIDE = time() + 0.75
+	local base = WeaponPackRuntime.TRAVELER_V51_HIDE_BASE
+	if base then
+		return base(character)
+	end
+end
+
+function WeaponPackRuntime.cleanupTravelerSlot(character, weaponName, keepModel)
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+	if not character or not config then
+		return 0
+	end
+
+	local removed = 0
+	for _, child in ipairs(character:GetChildren()) do
+		local belongs =
+			child.Name == config.ModelName
+			or child:GetAttribute("ScannedTravelerWeapon") == weaponName
+
+		if belongs and child ~= keepModel then
+			removed += 1
+			pcall(function()
+				child:Destroy()
+			end)
+		end
+	end
+	return removed
+end
+
+function WeaponPackRuntime.removeAllTravelerVisuals(character)
+	if not character then
+		return 0
+	end
+
+	local removed = 0
+	for _, child in ipairs(character:GetChildren()) do
+		local scannedName = child:GetAttribute("ScannedTravelerWeapon")
+		if child.Name == "HolsteredGun"
+			or child.Name == "HolsteredKnife"
+			or scannedName == "Chroma Traveler's Gun"
+			or scannedName == "Traveler's Knife" then
+
+			removed += 1
+			pcall(function()
+				child:Destroy()
+			end)
+		end
+	end
+	return removed
+end
+
+-- Build BOTH Traveler weapons from a normal Part + SpecialMesh. This avoids
+-- the MeshPart size refresh that caused the axe to appear enormous first,
+-- hitch the client, and then snap smaller.
+WeaponPackRuntime.buildScannedTravelerRoot = function(weaponName)
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+	if not config then
+		return nil
+	end
+
+	local root = Instance.new("Part")
+	root.Name = "Handle"
+	root.Anchored = false
+	root.CanCollide = false
+	root.CanTouch = false
+	root.CanQuery = false
+	root.Massless = true
+	root.Transparency = 0
+	root.LocalTransparencyModifier = 0
+	root.Color = Color3.new(1, 1, 1)
+	root.Material = Enum.Material.Plastic
+	root:SetAttribute("TravelerV51Root", true)
+
+	local mesh = Instance.new("SpecialMesh")
+	mesh.MeshType = Enum.MeshType.FileMesh
+	mesh.Offset = Vector3.zero
+	mesh.VertexColor = Vector3.new(1, 1, 1)
+	mesh.Parent = root
+
+	local attachment = Instance.new("Attachment")
+	attachment.CFrame = CFrame.new()
+	attachment.Parent = root
+
+	if weaponName == "Chroma Traveler's Gun" then
+		root.Size = Vector3.new(0.20000, 1.83000, 1.03000)
+		mesh.Name = "TravelerV51GunMesh"
+		mesh.MeshId = "rbxassetid://15090814396"
+		mesh.TextureId = "rbxassetid://132537117087610"
+		mesh.Scale = Vector3.new(0.04990, 0.04990, 0.04990)
+		attachment.Name = "GunWeaponAttachment"
+	else
+		-- Final axe size is applied ONCE before parenting/welding. There is no
+		-- RenderStep/Heartbeat size rewrite anymore.
+		root.Size = Vector3.new(0.20, 1.20, 0.70)
+		mesh.Name = "TravelerV51KnifeMesh"
+		mesh.MeshId = "rbxassetid://15057341638"
+		mesh.TextureId = "rbxassetid://15057460725"
+		mesh.Scale = WeaponPackRuntime.TRAVELER_V51_AXE_SCALE
+		attachment.Name = "KnifeWeaponAttachment"
+	end
+
+	return root, attachment
+end
+
+WeaponPackRuntime.isScannedTravelerVisualHealthy = function(character, weaponName)
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+	if not character or not config then
+		return false
+	end
+
+	local healthy = nil
+	local count = 0
+	for _, child in ipairs(character:GetChildren()) do
+		if child.Name == config.ModelName
+			or child:GetAttribute("ScannedTravelerWeapon") == weaponName then
+			count += 1
+			local root = child:FindFirstChild("Handle")
+			local weld = root and root:FindFirstChild("TravelerV51Weld")
+			local mesh = root and root:FindFirstChildWhichIsA("SpecialMesh")
+			if child:GetAttribute("TravelerV51") == true
+				and root
+				and root:IsA("Part")
+				and root:GetAttribute("TravelerV51Root") == true
+				and weld
+				and weld:IsA("Weld")
+				and mesh then
+				healthy = healthy or child
+			end
+		end
+	end
+
+	if healthy then
+		-- If old guards raced previously, collapse every duplicate immediately.
+		WeaponPackRuntime.cleanupTravelerSlot(character, weaponName, healthy)
+		return true
+	end
+
+	return false
+end
+
+WeaponPackRuntime.applyScannedTravelerWeapon = function(character, weaponName)
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[weaponName]
+	if not character or not config then
+		return false, "Traveler V51 config missing"
+	end
+
+	-- Multiple old heartbeat connections can arrive on the same frame after
+	-- repeatedly executing older builds. Only ONE may build this slot.
+	if WeaponPackRuntime.TRAVELER_V51_APPLY_LOCKS[weaponName] then
+		return true
+	end
+	WeaponPackRuntime.TRAVELER_V51_APPLY_LOCKS[weaponName] = true
+
+	local ok, success, reason = pcall(function()
+		if WeaponPackRuntime.isScannedTravelerVisualHealthy(character, weaponName) then
+			-- V63: an already-existing Traveler gun used to return here before
+			-- the requested angle was written to its weld. Force the latest
+			-- transform onto the live gun even when the model is healthy.
+			if weaponName == "Chroma Traveler's Gun" then
+				local model = character:FindFirstChild(config.ModelName)
+				local root = model and model:FindFirstChild("Handle")
+				local weld = root and root:FindFirstChild("TravelerV51Weld")
+				if weld and weld:IsA("Weld") then
+					weld.C0 = WeaponPackRuntime.TRAVELER_V63_GUN_CFRAME
+					weld.C1 = CFrame.new()
+				end
+			end
+
+			WeaponPackRuntime.setMM2WeaponDisplayHidden(config.Type, true)
+			return true
+		end
+
+		-- Capture MM2's real torso-relative placement before masking the native
+		-- display. The scanned gun geometry itself is upside-down when recreated
+		-- as our Part + SpecialMesh, so rotate ONLY the gun 180 degrees around
+		-- its local Z axis after using MM2's native torso offset.
+		local nativeOffset = nil
+		if WeaponPackRuntime.captureTravelerV46NativeOffset then
+			nativeOffset = WeaponPackRuntime.captureTravelerV46NativeOffset(
+				character,
+				config.Type
+			)
+		end
+		nativeOffset = nativeOffset or config.TorsoCFrame
+		if weaponName == "Chroma Traveler's Gun" then
+			-- V63 uses the requested +5 degree gun angle and forces it
+			-- onto the live weld instead of only setting it on first spawn.
+			nativeOffset = WeaponPackRuntime.TRAVELER_V63_GUN_CFRAME
+		elseif weaponName == "Traveler's Knife" then
+			nativeOffset = nativeOffset * (WeaponPackRuntime.TRAVELER_V53_KNIFE_OFFSET or CFrame.new())
+		end
+
+		-- Remove every old V43-V50 copy in this slot BEFORE creating V51.
+		WeaponPackRuntime.cleanupTravelerSlot(character, weaponName, nil)
+
+		local torso = character:FindFirstChild("UpperTorso")
+			or character:FindFirstChild("Torso")
+			or character:FindFirstChild("LowerTorso")
+		if not torso or not torso:IsA("BasePart") then
+			return false, "torso missing"
+		end
+
+		local root, attachment =
+			WeaponPackRuntime.buildScannedTravelerRoot(weaponName)
+		if not root or not attachment then
+			return false, "Traveler V51 root build failed"
+		end
+
+		local model = Instance.new("Model")
+		model.Name = config.ModelName
+		model:SetAttribute("ScriptOwnedWeapon", true)
+		model:SetAttribute("ScannedTravelerWeapon", weaponName)
+		model:SetAttribute("WeaponName", weaponName)
+		model:SetAttribute("TravelerV51", true)
+
+		root.Parent = model
+		model.PrimaryPart = root
+		model.Parent = character
+
+		root.CFrame = torso.CFrame * nativeOffset
+
+		local weld = Instance.new("Weld")
+		weld.Name = "TravelerV51Weld"
+		weld.Part0 = torso
+		weld.Part1 = root
+		weld.C0 = nativeOffset
+		weld.C1 = CFrame.new()
+		weld.Parent = root
+
+		WeaponPackRuntime.setMM2WeaponDisplayHidden(config.Type, true)
+		WeaponPackRuntime.hideScannedOriginals(character)
+		return true
+	end)
+
+	WeaponPackRuntime.TRAVELER_V51_APPLY_LOCKS[weaponName] = nil
+
+	if not ok then
+		return false, tostring(success)
+	end
+	return success, reason
+end
+
+-- One lightweight mask at the end of render. No mesh creation, no size writes,
+-- no GetConnectedParts calls, and no CFrame recapture in this loop.
+RunService:BindToRenderStep(
+	"TravelerV51NativeMask",
+	10060,
+	function()
+		local folder = workspace:FindFirstChild("WeaponDisplays")
+		if not folder then
+			return
+		end
+
+		if WeaponPackRuntime.selectedGunName == "Chroma Traveler's Gun" then
+			local display = folder:FindFirstChild("GunDisplay")
+			if display and display:IsA("BasePart") then
+				display.LocalTransparencyModifier = 1
+			end
+
+			-- V63: keep the requested +5 degree transform authoritative.
+			-- This is only one Weld C0 write, so it is cheap and prevents
+			-- older Traveler guards from leaving the gun at the old angle.
+			local character = player.Character
+			local model = character and character:FindFirstChild("HolsteredGun")
+			local root = model and model:FindFirstChild("Handle")
+			local weld = root and root:FindFirstChild("TravelerV51Weld")
+			if weld and weld:IsA("Weld") then
+				weld.C0 = WeaponPackRuntime.TRAVELER_V63_GUN_CFRAME
+				weld.C1 = CFrame.new()
+			end
+		end
+
+		if WeaponPackRuntime.selectedKnifeName == "Traveler's Knife" then
+			local display = folder:FindFirstChild("KnifeDisplay")
+			if display and display:IsA("BasePart") then
+				display.LocalTransparencyModifier = 1
+			end
+		end
+	end
+)
+
+-- REMOVE in the older function restores meshes but did not destroy
+-- HolsteredGun/HolsteredKnife. This second handler runs after it and guarantees
+-- every Traveler copy disappears, including duplicates left by older builds.
+removeWeaponButton.MouseButton1Click:Connect(function()
+	task.defer(function()
+		local character = player.Character
+		WeaponPackRuntime.removeAllTravelerVisuals(character)
+		WeaponPackRuntime.TRAVELER_V51_APPLY_LOCKS = {}
+		WeaponPackRuntime.setMM2WeaponDisplayHidden("Gun", false)
+		WeaponPackRuntime.setMM2WeaponDisplayHidden("Knife", false)
+	end)
+end)
+
+-- Clean stale duplicates immediately when V51 is executed over an older build.
+pcall(function()
+	local character = player.Character
+	if character then
+		WeaponPackRuntime.removeAllTravelerVisuals(character)
+	end
+end)
+
+-- V63: remove one stale Traveler gun from a previous build so the first
+-- equip after executing this file starts from the new forced-weld version.
+pcall(function()
+	local character = player.Character
+	local model = character and character:FindFirstChild("HolsteredGun")
+	if model and model:GetAttribute("ScannedTravelerWeapon") == "Chroma Traveler's Gun" then
+		model:Destroy()
+	end
+end)
+
+pcall(function()
+	weaponStatus.Text = "V63 GUN +5 FORCE-APPLY ACTIVE"
+	weaponStatus.TextColor3 = Color3.fromRGB(90, 235, 130)
+end)
+
+
+--------------------------------------------------
+-- TRAVELER GUN TRUE-BELT ATTACHMENT FIX V64
+--
+-- Continue from the supplied V63 build. Do not guess the Traveler gun's
+-- torso CFrame anymore. MM2 already gives the character a GunBelt attachment,
+-- and the scanned Traveler display can expose its GunWeaponAttachment.
+-- Align those two attachments directly, exactly like a native holstered item.
+--
+-- This keeps the verified Chroma Traveler's Gun mesh/texture from V51/V63,
+-- preserves the separate knife slot, and only replaces the gun placement path.
+--------------------------------------------------
+
+WeaponPackRuntime.TRAVELER_V64_ACTIVE = true
+WeaponPackRuntime.TRAVELER_V64_GUN_MESH = "rbxassetid://15090814396"
+WeaponPackRuntime.TRAVELER_V64_GUN_TEXTURE = "rbxassetid://132537117087610"
+WeaponPackRuntime.TRAVELER_V64_GUN_SCALE = Vector3.new(0.04990, 0.04990, 0.04990)
+WeaponPackRuntime.TRAVELER_V64_GUN_PART_SIZE = Vector3.new(0.20000, 1.83000, 1.03000)
+WeaponPackRuntime.TRAVELER_V64_GUN_WEAPON_CFRAME = nil
+
+-- Cache the final V63/V51 implementation so Traveler's Knife continues to use
+-- the exact version that was working in the supplied script.
+if not WeaponPackRuntime.TRAVELER_V64_PREVIOUS_APPLY then
+	WeaponPackRuntime.TRAVELER_V64_PREVIOUS_APPLY =
+		WeaponPackRuntime.applyScannedTravelerWeapon
+end
+
+function WeaponPackRuntime.getTravelerV64GunBelt(character)
+	if not character then
+		return nil
+	end
+
+	-- Prefer the body's real MM2 GunBelt attachment. Ignore attachments inside
+	-- script-owned gun models or accessories.
+	for _, object in ipairs(character:GetDescendants()) do
+		if object:IsA("Attachment")
+			and object.Name == "GunBelt"
+			and object.Parent
+			and object.Parent:IsA("BasePart")
+			and object.Parent.Parent == character then
+
+			return object
+		end
+	end
+
+	-- Standard R15/R6 fast path.
+	local torso = character:FindFirstChild("LowerTorso")
+		or character:FindFirstChild("Torso")
+		or character:FindFirstChild("UpperTorso")
+
+	local direct = torso and torso:FindFirstChild("GunBelt")
+	if direct and direct:IsA("Attachment") then
+		return direct
+	end
+
+	return nil
+end
+
+function WeaponPackRuntime.captureTravelerV64GunWeaponCFrame()
+	if WeaponPackRuntime.TRAVELER_V64_GUN_WEAPON_CFRAME then
+		return WeaponPackRuntime.TRAVELER_V64_GUN_WEAPON_CFRAME
+	end
+
+	local function trySource(source)
+		if not source then
+			return nil
+		end
+
+		local mesh = source:FindFirstChildWhichIsA("SpecialMesh", true)
+		if mesh
+			and tostring(mesh.MeshId) ~= WeaponPackRuntime.TRAVELER_V64_GUN_MESH then
+			return nil
+		end
+
+		local attachment = source:FindFirstChild("GunWeaponAttachment", true)
+		if attachment and attachment:IsA("Attachment") then
+			return attachment.CFrame
+		end
+
+		return nil
+	end
+
+	-- Best source: the exact display clone captured by this same script before
+	-- MM2 changed Workspace.WeaponDisplays.
+	local cached = WeaponPackRuntime.SCANNED_TRAVELER_SOURCE_CACHE
+		and WeaponPackRuntime.SCANNED_TRAVELER_SOURCE_CACHE[
+			"Chroma Traveler's Gun"
+		]
+
+	local found = trySource(cached)
+
+	-- Second choice: the currently loaded MM2 display, but only when it uses the
+	-- verified Traveler gun mesh. We do not trust random GunDisplay geometry.
+	if not found then
+		local folder = workspace:FindFirstChild("WeaponDisplays")
+		local live = folder and folder:FindFirstChild("GunDisplay")
+		found = trySource(live)
+	end
+
+	-- If MM2 does not expose the weapon-side attachment, identity is safer than
+	-- another guessed torso rotation: GunBelt itself still carries MM2's native
+	-- body-side position and orientation.
+	WeaponPackRuntime.TRAVELER_V64_GUN_WEAPON_CFRAME =
+		found or CFrame.new()
+
+	return WeaponPackRuntime.TRAVELER_V64_GUN_WEAPON_CFRAME
+end
+
+function WeaponPackRuntime.buildTravelerV64GunRoot()
+	local root = Instance.new("Part")
+	root.Name = "Handle"
+	root.Size = WeaponPackRuntime.TRAVELER_V64_GUN_PART_SIZE
+	root.Anchored = false
+	root.CanCollide = false
+	root.CanTouch = false
+	root.CanQuery = false
+	root.Massless = true
+	root.Transparency = 0
+	root.LocalTransparencyModifier = 0
+	root.Color = Color3.new(1, 1, 1)
+	root.Material = Enum.Material.Plastic
+	root:SetAttribute("TravelerV51Root", true)
+	root:SetAttribute("TravelerV64Root", true)
+
+	local mesh = Instance.new("SpecialMesh")
+	mesh.Name = "TravelerV64GunMesh"
+	mesh.MeshType = Enum.MeshType.FileMesh
+	mesh.MeshId = WeaponPackRuntime.TRAVELER_V64_GUN_MESH
+	mesh.TextureId = WeaponPackRuntime.TRAVELER_V64_GUN_TEXTURE
+	mesh.Scale = WeaponPackRuntime.TRAVELER_V64_GUN_SCALE
+	mesh.Offset = Vector3.zero
+	mesh.VertexColor = Vector3.new(1, 1, 1)
+	mesh.Parent = root
+
+	local weaponAttachment = Instance.new("Attachment")
+	weaponAttachment.Name = "GunWeaponAttachment"
+	weaponAttachment.CFrame =
+		WeaponPackRuntime.captureTravelerV64GunWeaponCFrame()
+	weaponAttachment.Parent = root
+
+	return root, weaponAttachment
+end
+
+function WeaponPackRuntime.applyTravelerV64Gun(character)
+	if not character then
+		return false, "character missing"
+	end
+
+	local config = WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS
+		and WeaponPackRuntime.SCANNED_TRAVELER_WEAPONS[
+			"Chroma Traveler's Gun"
+		]
+
+	if not config then
+		return false, "Traveler gun config missing"
+	end
+
+	local gunBelt = WeaponPackRuntime.getTravelerV64GunBelt(character)
+	if not gunBelt or not gunBelt.Parent or not gunBelt.Parent:IsA("BasePart") then
+		-- If a map/round temporarily removes MM2's GunBelt, keep V63 as the
+		-- fallback rather than making the gun vanish.
+		local previous = WeaponPackRuntime.TRAVELER_V64_PREVIOUS_APPLY
+		if previous then
+			return previous(character, "Chroma Traveler's Gun")
+		end
+		return false, "GunBelt missing"
+	end
+
+	local model = character:FindFirstChild(config.ModelName)
+	local root = model and model:FindFirstChild("Handle")
+	local weld = root and root:FindFirstChild("TravelerV64Weld")
+	local mesh = root and root:FindFirstChildWhichIsA("SpecialMesh")
+	local weaponAttachment = root and root:FindFirstChild("GunWeaponAttachment")
+
+	local healthy = model
+		and model:GetAttribute("TravelerV64") == true
+		and root
+		and root:IsA("Part")
+		and root:GetAttribute("TravelerV64Root") == true
+		and weld
+		and weld:IsA("Weld")
+		and mesh
+		and weaponAttachment
+		and weaponAttachment:IsA("Attachment")
+
+	if not healthy then
+		-- Delete every old Traveler gun copy, including V43-V63 leftovers.
+		if WeaponPackRuntime.cleanupTravelerSlot then
+			WeaponPackRuntime.cleanupTravelerSlot(
+				character,
+				"Chroma Traveler's Gun",
+				nil
+			)
+		else
+			for _, child in ipairs(character:GetChildren()) do
+				if child.Name == config.ModelName
+					or child:GetAttribute("ScannedTravelerWeapon")
+						== "Chroma Traveler's Gun" then
+					pcall(function() child:Destroy() end)
+				end
+			end
+		end
+
+		root, weaponAttachment =
+			WeaponPackRuntime.buildTravelerV64GunRoot()
+
+		model = Instance.new("Model")
+		model.Name = config.ModelName
+		model:SetAttribute("ScriptOwnedWeapon", true)
+		model:SetAttribute("ScannedTravelerWeapon", "Chroma Traveler's Gun")
+		model:SetAttribute("WeaponName", "Chroma Traveler's Gun")
+		-- Keep V51 compatibility so older health checks do not spawn duplicates.
+		model:SetAttribute("TravelerV51", true)
+		model:SetAttribute("TravelerV64", true)
+
+		root.Parent = model
+		model.PrimaryPart = root
+		model.Parent = character
+
+		weld = Instance.new("Weld")
+		weld.Name = "TravelerV64Weld"
+		weld.Part0 = gunBelt.Parent
+		weld.Part1 = root
+		weld.C0 = gunBelt.CFrame
+		weld.C1 = weaponAttachment.CFrame
+		weld.Parent = root
+
+		-- Also give the model the old weld name as a harmless compatibility
+		-- marker. It is not used for positioning; V64Weld is authoritative.
+		local compatibilityWeld = Instance.new("Weld")
+		compatibilityWeld.Name = "TravelerV51Weld"
+		-- Deliberately leave Part0/Part1 nil. Older health checks only look for
+		-- the named Weld instance; keeping it inert prevents a second joint from
+		-- fighting V64's real attachment-aligned weld.
+		compatibilityWeld.C0 = CFrame.new()
+		compatibilityWeld.C1 = CFrame.new()
+		compatibilityWeld.Parent = root
+	else
+		-- Force the exact verified asset, but do NOT animate/tint it. The scanned
+		-- chroma texture is already the correct appearance.
+		root.Size = WeaponPackRuntime.TRAVELER_V64_GUN_PART_SIZE
+		root.Transparency = 0
+		root.LocalTransparencyModifier = 0
+		mesh.MeshType = Enum.MeshType.FileMesh
+		mesh.MeshId = WeaponPackRuntime.TRAVELER_V64_GUN_MESH
+		mesh.TextureId = WeaponPackRuntime.TRAVELER_V64_GUN_TEXTURE
+		mesh.Scale = WeaponPackRuntime.TRAVELER_V64_GUN_SCALE
+		mesh.Offset = Vector3.zero
+		mesh.VertexColor = Vector3.new(1, 1, 1)
+	end
+
+	-- This is the important V64 change: solve the holster from the two actual
+	-- attachments instead of a hardcoded torso CFrame.
+	local currentWeaponCFrame =
+		WeaponPackRuntime.captureTravelerV64GunWeaponCFrame()
+
+	weaponAttachment.CFrame = currentWeaponCFrame
+	weld.Part0 = gunBelt.Parent
+	weld.C0 = gunBelt.CFrame
+	weld.C1 = currentWeaponCFrame
+
+	-- Set once immediately so there is no one-frame jump before the weld solves.
+	root.CFrame = gunBelt.WorldCFrame * currentWeaponCFrame:Inverse()
+
+	if WeaponPackRuntime.setMM2WeaponDisplayHidden then
+		WeaponPackRuntime.setMM2WeaponDisplayHidden("Gun", true)
+	end
+	if WeaponPackRuntime.hideScannedOriginals then
+		WeaponPackRuntime.hideScannedOriginals(character)
+	end
+
+	return true
+end
+
+-- Route only Chroma Traveler's Gun through V64. Traveler's Knife stays exactly
+-- on the supplied script's V51/V53 path.
+WeaponPackRuntime.applyScannedTravelerWeapon = function(character, weaponName)
+	if weaponName == "Chroma Traveler's Gun" then
+		return WeaponPackRuntime.applyTravelerV64Gun(character)
+	end
+
+	local previous = WeaponPackRuntime.TRAVELER_V64_PREVIOUS_APPLY
+	if previous then
+		return previous(character, weaponName)
+	end
+
+	return false, "previous Traveler apply missing"
+end
+
+-- Replace V63's hardcoded torso-CFrame render guard with one cheap attachment
+-- alignment guard. This only touches the gun while that gun slot is selected.
+pcall(function()
+	RunService:UnbindFromRenderStep("TravelerV51NativeMask")
+	RunService:UnbindFromRenderStep("TravelerV64TrueBeltGuard")
+end)
+
+RunService:BindToRenderStep(
+	"TravelerV64TrueBeltGuard",
+	10070,
+	function()
+		if WeaponPackRuntime.selectedGunName ~= "Chroma Traveler's Gun" then
+			return
+		end
+
+		local character = player.Character
+		if not character or not character.Parent then
+			return
+		end
+
+		local gunBelt = WeaponPackRuntime.getTravelerV64GunBelt(character)
+		local model = character:FindFirstChild("HolsteredGun")
+		local root = model and model:FindFirstChild("Handle")
+		local weld = root and root:FindFirstChild("TravelerV64Weld")
+		local weaponAttachment = root and root:FindFirstChild("GunWeaponAttachment")
+
+		if not gunBelt
+			or not root
+			or not weld
+			or not weaponAttachment then
+			WeaponPackRuntime.applyTravelerV64Gun(character)
+			return
+		end
+
+		-- Keep the gun locked to MM2's live GunBelt through round transitions.
+		weld.Part0 = gunBelt.Parent
+		weld.C0 = gunBelt.CFrame
+		weld.C1 = weaponAttachment.CFrame
+		root.LocalTransparencyModifier = 0
+
+		local mesh = root:FindFirstChildWhichIsA("SpecialMesh")
+		if mesh then
+			mesh.MeshId = WeaponPackRuntime.TRAVELER_V64_GUN_MESH
+			mesh.TextureId = WeaponPackRuntime.TRAVELER_V64_GUN_TEXTURE
+			mesh.Scale = WeaponPackRuntime.TRAVELER_V64_GUN_SCALE
+			mesh.VertexColor = Vector3.new(1, 1, 1)
+		end
+
+		local folder = workspace:FindFirstChild("WeaponDisplays")
+		local display = folder and folder:FindFirstChild("GunDisplay")
+		if display and display:IsA("BasePart") then
+			display.LocalTransparencyModifier = 1
+		end
+	end
+)
+
+-- Destroy a stale V63 Traveler gun immediately so the next click/equip starts
+-- from the attachment-aligned V64 model, while leaving the knife untouched.
+pcall(function()
+	local character = player.Character
+	local model = character and character:FindFirstChild("HolsteredGun")
+	if model and model:GetAttribute("ScannedTravelerWeapon") == "Chroma Traveler's Gun" then
+		model:Destroy()
+	end
+end)
+
+pcall(function()
+	weaponStatus.Text = "V64 TRAVELER GUN TRUE-BELT FIX ACTIVE"
+	weaponStatus.TextColor3 = Color3.fromRGB(90, 235, 130)
+end)
+
+
+--------------------------------------------------
+-- TRAVELER AXE POSITION FIX V68
+--
+-- Keep V64's Traveler gun fix unchanged. Raise ONLY Traveler's Knife/Axe
+-- vertically on the torso while preserving its current size and rotation.
+--------------------------------------------------
+
+WeaponPackRuntime.TRAVELER_V65_ACTIVE = true
+WeaponPackRuntime.TRAVELER_V65_KNIFE_RAISE = 0.15
+
+-- Cache V64's final dispatcher so the gun continues to use V64 exactly.
+if not WeaponPackRuntime.TRAVELER_V65_PREVIOUS_APPLY then
+	WeaponPackRuntime.TRAVELER_V65_PREVIOUS_APPLY =
+		WeaponPackRuntime.applyScannedTravelerWeapon
+end
+
+function WeaponPackRuntime.raiseTravelerV65Knife(character)
+	if not character then
+		return false, "character missing"
+	end
+
+	local model = character:FindFirstChild("HolsteredKnife")
+	local root = model and model:FindFirstChild("Handle")
+	local weld = root and root:FindFirstChild("TravelerV51Weld")
+
+	if not model
+		or model:GetAttribute("ScannedTravelerWeapon") ~= "Traveler's Knife"
+		or not root
+		or not weld
+		or not weld:IsA("Weld") then
+		return false, "Traveler axe weld missing"
+	end
+
+	-- Save the untouched V51/V53 pose once. A CFrameValue prevents repeated
+	-- calls/render guards from adding the height offset over and over.
+	local baseValue = root:FindFirstChild("TravelerV65BaseC0")
+	if not baseValue or not baseValue:IsA("CFrameValue") then
+		if baseValue then
+			baseValue:Destroy()
+		end
+
+		baseValue = Instance.new("CFrameValue")
+		baseValue.Name = "TravelerV65BaseC0"
+		baseValue.Value = weld.C0
+		baseValue.Parent = root
+	end
+
+	-- Pre-multiply so this is a true torso-local UP movement. Rotation and
+	-- sideways placement stay exactly the same as the supplied V63/V64 build.
+	weld.C0 =
+		CFrame.new(0, WeaponPackRuntime.TRAVELER_V65_KNIFE_RAISE, 0)
+		* baseValue.Value
+	weld.C1 = CFrame.new()
+
+	root.LocalTransparencyModifier = 0
+	return true
+end
+
+-- Route the axe through V64/V51 first, then apply only the higher Y position.
+WeaponPackRuntime.applyScannedTravelerWeapon = function(character, weaponName)
+	local previous = WeaponPackRuntime.TRAVELER_V65_PREVIOUS_APPLY
+
+	if weaponName == "Traveler's Knife" then
+		local ok, reason = false, "previous Traveler apply missing"
+		if previous then
+			ok, reason = previous(character, weaponName)
+		end
+
+		if not ok then
+			return ok, reason
+		end
+
+		local raised, raiseReason =
+			WeaponPackRuntime.raiseTravelerV65Knife(character)
+
+		if not raised then
+			return false, raiseReason
+		end
+
+		return true
+	end
+
+	if previous then
+		return previous(character, weaponName)
+	end
+
+	return false, "previous Traveler apply missing"
+end
+
+-- Cheap position lock: keeps the axe at the higher waist position through
+-- round/map transitions without touching its mesh, size, or rotation.
+pcall(function()
+	RunService:UnbindFromRenderStep("TravelerV65KnifeHeightGuard")
+end)
+
+RunService:BindToRenderStep(
+	"TravelerV65KnifeHeightGuard",
+	10071,
+	function()
+		if WeaponPackRuntime.selectedKnifeName ~= "Traveler's Knife" then
+			return
+		end
+
+		local character = player.Character
+		if not character or not character.Parent then
+			return
+		end
+
+		local model = character:FindFirstChild("HolsteredKnife")
+		local root = model and model:FindFirstChild("Handle")
+		local weld = root and root:FindFirstChild("TravelerV51Weld")
+
+		if not model or not root or not weld then
+			WeaponPackRuntime.applyScannedTravelerWeapon(
+				character,
+				"Traveler's Knife"
+			)
+			return
+		end
+
+		WeaponPackRuntime.raiseTravelerV65Knife(character)
+
+		local folder = workspace:FindFirstChild("WeaponDisplays")
+		local display = folder and folder:FindFirstChild("KnifeDisplay")
+		if display and display:IsA("BasePart") then
+			display.LocalTransparencyModifier = 1
+		end
+	end
+)
+
+-- If the axe is already selected when this file executes, raise it immediately.
+pcall(function()
+	if WeaponPackRuntime.selectedKnifeName == "Traveler's Knife" then
+		WeaponPackRuntime.applyScannedTravelerWeapon(
+			player.Character,
+			"Traveler's Knife"
+		)
+	end
+end)
+
+pcall(function()
+	weaponStatus.Text = "V68 TRAVELER AXE LOWER AGAIN ACTIVE"
+	weaponStatus.TextColor3 = Color3.fromRGB(90, 235, 130)
 end)
