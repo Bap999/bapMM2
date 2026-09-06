@@ -14218,7 +14218,11 @@ for _, configuredWeapon in ipairs(
 				configuredWeapon
 			)
 
-		elseif weaponType == "Knife" then
+		elseif weaponType == "Knife"
+			and configuredWeapon ~= "Traveler's Knife" then
+
+			-- Traveler's Axe/Knife stays available for the PLAYER, but bots
+			-- must never randomly receive it.
 			table.insert(
 				WeaponPackRuntime.BOT_KNIFE_POOL,
 				configuredWeapon
@@ -14256,11 +14260,16 @@ WeaponPackRuntime.equipBotDualLoadout =
 		end
 
 		if knifeName
-			and WeaponPackRuntime.PLAYER_WEAPON_EQUIP_DISABLED[
-				knifeName
-			] then
+			and (
+				WeaponPackRuntime.PLAYER_WEAPON_EQUIP_DISABLED[
+					knifeName
+				]
+				or knifeName == "Traveler's Knife"
+			) then
 
+			-- Do not preserve Traveler's Axe on bots across round transitions.
 			knifeName = nil
+			bot.knifeName = nil
 		end
 
 		if not gunName
