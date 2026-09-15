@@ -1,4 +1,5 @@
 
+
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -64,8 +65,8 @@ local RANDOM_JUMP_CHANCE = 0.035
 local RANDOM_JUMP_MIN_INTERVAL = 3
 local RANDOM_JUMP_MAX_INTERVAL = 8
 
--- Replace TWO bots every 5 minutes, one by one
-local BOT_ROTATION_INTERVAL = 5 * 60
+-- Replace TWO bots every 1 minute, one by one
+local BOT_ROTATION_INTERVAL = 60
 
 --------------------------------------------------
 -- BOT ANIMATION STYLES
@@ -336,6 +337,46 @@ local BOT_AVATAR_ENTRIES = {
 	"CXRVXNXALT",
 	"Blame2ninja",
 	"Theonlyone_theo",
+	"arjy361",
+	"Pheraum48",
+	"cia220307",
+	"urlove_mel13",
+	"Bunny_Sparkle0988",
+	"WAAA_580",
+	"envyx42",
+	"Xss_nns",
+	"Ryoo0zz",
+	"The_Nasss",
+	"hah63870",
+	"Lghhvhr",
+	"aayyysyez",
+	"SunnyLiang666",
+	"The_Globosa",
+	"lifblmdigunakan",
+	"m14ww_9",
+	"aFz_baco602",
+	"de9_ynn",
+	"fluwt3rr",
+	"NCOMU_0043",
+	"ars_y81",
+	"Vanianat53",
+	"koceng_ireng25",
+	"DaffaSyailendra20",
+	"kitsuneg85",
+	"zaya_8607",
+	"ugeyuute",
+	"Rizul103",
+	"kkaystraw",
+	"Alma_puyol3",
+	"Milklyche",
+	"slmrahma11",
+	"jema_3417",
+	"rip_jensen855",
+	"ashela_miw",
+	"RFIKI232",
+	"prrttyluvv",
+	"mirandina882",
+	"botak_kerdil82292",
 }
 
 local BOT_AVATARS = {}
@@ -358,6 +399,47 @@ local messages = {
 	"girl give me one",
 	"i followed u please",
 	"i joined from ur live",
+	"can i get sweet and treat pls?",
+	"can i get turkey",
+	"girl tysm",
+	"sakura set please",
+	"pls me next i followed and liked",
+	"cute avatar",
+	"i like ur avatar",
+	"nice fit",
+	"gingerscope pls",
+	"PLS TRADE",
+	"pls one godly",
+	"can i choose them?",
+	"im in ur live",
+	"omg girl u made my day",
+	"TY",
+	"ur so kind ty",
+	"i got my dream godlies",
+	"can i trade again",
+	"pls one more",
+	"trade me and i'll leave",
+	"thankss",
+	"god bless u",
+	"im so grateful",
+	"my sister will join too pls",
+	"pls heartblade",
+	"can i have gscope",
+	"i want chroma heartwand",
+	"raygun harvester and turkey",
+	"gingerscoop  plz",
+	"rainbow set is my dream",
+	"one godly is enough pls",
+	"notice me",
+	"can we play together",
+	"do u make upgrades",
+	"can u upgrade my laser",
+	"is it really free",
+	"wow rich",
+	"how are u so rich",
+	"all chromas pls",
+	"i want chroma snowcannon and chroma raygun",
+	"darkset and evergun set",
 }
 
 local bots = {}
@@ -14212,17 +14294,21 @@ for _, configuredWeapon in ipairs(
 				configuredWeapon
 			]
 
-		if weaponType == "Gun" then
+		if weaponType == "Gun"
+			and configuredWeapon ~= "Evergun" then
+
+			-- Evergun stays available for the PLAYER, but bots never spawn with it.
 			table.insert(
 				WeaponPackRuntime.BOT_GUN_POOL,
 				configuredWeapon
 			)
 
 		elseif weaponType == "Knife"
-			and configuredWeapon ~= "Traveler's Knife" then
+			and configuredWeapon ~= "Traveler's Knife"
+			and configuredWeapon ~= "Evergreen" then
 
-			-- Traveler's Axe/Knife stays available for the PLAYER, but bots
-			-- must never randomly receive it.
+			-- Traveler's Axe/Knife and Evergreen stay available for the PLAYER,
+			-- but bots must never randomly receive them.
 			table.insert(
 				WeaponPackRuntime.BOT_KNIFE_POOL,
 				configuredWeapon
@@ -14252,11 +14338,15 @@ WeaponPackRuntime.equipBotDualLoadout =
 
 		-- Never preserve a bot weapon that was removed from the weapon pools.
 		if gunName
-			and WeaponPackRuntime.PLAYER_WEAPON_EQUIP_DISABLED[
-				gunName
-			] then
+			and (
+				WeaponPackRuntime.PLAYER_WEAPON_EQUIP_DISABLED[
+					gunName
+				]
+				or gunName == "Evergun"
+			) then
 
 			gunName = nil
+			bot.gunName = nil
 		end
 
 		if knifeName
@@ -14265,9 +14355,10 @@ WeaponPackRuntime.equipBotDualLoadout =
 					knifeName
 				]
 				or knifeName == "Traveler's Knife"
+				or knifeName == "Evergreen"
 			) then
 
-			-- Do not preserve Traveler's Axe on bots across round transitions.
+			-- Do not preserve Traveler's Axe or Evergreen on bots across round transitions.
 			knifeName = nil
 			bot.knifeName = nil
 		end
@@ -14307,6 +14398,87 @@ WeaponPackRuntime.equipBotDualLoadout =
 			if gunSuccess then
 				bot.gunName =
 					gunName
+
+				bot.gunEquipRetryCount = 0
+			else
+				-- A single unavailable gun visual must never leave the bot gunless.
+				-- Shuffle the rest of the allowed gun pool and keep trying until
+				-- one actually holsters successfully. Evergun is already excluded
+				-- from BOT_GUN_POOL above.
+				bot.gunName = nil
+
+				local gunCandidates = {}
+
+				for _, candidateName in ipairs(
+					WeaponPackRuntime.BOT_GUN_POOL
+				) do
+					if candidateName ~= gunName then
+						table.insert(
+							gunCandidates,
+							candidateName
+						)
+					end
+				end
+
+				for i = #gunCandidates, 2, -1 do
+					local j = math.random(1, i)
+
+					gunCandidates[i],
+					gunCandidates[j] =
+						gunCandidates[j],
+						gunCandidates[i]
+				end
+
+				for _, candidateName in ipairs(
+					gunCandidates
+				) do
+					if not bot.model
+						or not bot.model.Parent then
+
+						break
+					end
+
+					local candidateSuccess =
+						holsterWeapon(
+							bot.model,
+							candidateName,
+							"HolsteredGun"
+						)
+
+					if candidateSuccess then
+						gunName = candidateName
+						bot.gunName = candidateName
+						bot.gunEquipRetryCount = 0
+						gunSuccess = true
+						break
+					end
+				end
+
+				-- If MM2's weapon visuals were still loading and every candidate
+				-- failed this pass, retry the whole allowed pool shortly after.
+				if not gunSuccess
+					and bot.model
+					and bot.model.Parent then
+
+					bot.gunEquipRetryCount =
+						(bot.gunEquipRetryCount or 0) + 1
+
+					if bot.gunEquipRetryCount <= 3 then
+						task.delay(1.25, function()
+							if bot.model
+								and bot.model.Parent
+								and not bot.model:FindFirstChild(
+									"HolsteredGun"
+								) then
+
+								WeaponPackRuntime.equipBotDualLoadout(
+									bot,
+									true
+								)
+							end
+						end)
+					end
+				end
 			end
 		end
 
@@ -14954,7 +15126,7 @@ end
 -- TWO-BOT ROTATION
 --------------------------------------------------
 
-local function getUnusedReplacementAvatar(excludedUserId)
+local function getUnusedReplacementAvatar(excludedUserIds)
 	local activeIds = {}
 
 	for _, bot in ipairs(bots) do
@@ -14967,7 +15139,7 @@ local function getUnusedReplacementAvatar(excludedUserId)
 
 	for _, avatar in ipairs(BOT_AVATARS) do
 		if not activeIds[avatar.userId]
-			and avatar.userId ~= excludedUserId then
+			and not (excludedUserIds and excludedUserIds[avatar.userId]) then
 
 			table.insert(choices, avatar)
 		end
@@ -15047,6 +15219,21 @@ local function rotateTwoBots()
 		end
 	end
 
+	-- Block both outgoing avatars for this whole rotation so the two
+	-- replacements are genuinely different bots, not a swap/reuse.
+	local excludedReplacementIds = {}
+
+	for _, targetNumber in ipairs(targetNumbers) do
+		for _, bot in ipairs(bots) do
+			if bot.number == targetNumber
+				and bot.userId then
+
+				excludedReplacementIds[bot.userId] = true
+				break
+			end
+		end
+	end
+
 	for _, targetNumber in ipairs(
 		targetNumbers
 	) do
@@ -15079,7 +15266,7 @@ local function rotateTwoBots()
 
 			local replacement =
 				getUnusedReplacementAvatar(
-					oldBot.userId
+					excludedReplacementIds
 				)
 
 			if replacement then
@@ -15128,7 +15315,7 @@ local function startBotRotation()
 				break
 			end
 
-			-- Every 5 minutes, replace TWO distinct bots one by one.
+			-- Every 1 minute, replace TWO distinct bots one by one.
 			rotateTwoBots()
 		end
 	end)
