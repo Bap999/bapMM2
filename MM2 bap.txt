@@ -6323,6 +6323,32 @@ WeaponPackRuntime.ControllerUI.AutoTradeButton.MouseButton1Click:Connect(functio
 	)
 end)
 
+--------------------------------------------------
+-- Z = ONE-TIME RANDOM USERNAME TRADE
+-- Uses the existing FakeTrade.Open() flow directly.
+-- Auto Trade remains OFF, so completion cannot schedule another trade.
+--------------------------------------------------
+WeaponPackRuntime.FakeTrade.OneTimeRandomTrade = function()
+	if WeaponPackRuntime.FakeTrade.Active then
+		return false
+	end
+
+	return WeaponPackRuntime.FakeTrade.Open() == true
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then
+		return
+	end
+
+	if input.UserInputType == Enum.UserInputType.Keyboard
+		and input.KeyCode == Enum.KeyCode.Z
+		and not UserInputService:GetFocusedTextBox() then
+
+		WeaponPackRuntime.FakeTrade.OneTimeRandomTrade()
+	end
+end)
+
 WeaponPackRuntime.ControllerUI.RealisticSpawnerButton = createButton(
 	"REALISTIC SPAWNER",
 	UDim2.new(0, 6, 0, 48),
